@@ -51,16 +51,15 @@ class FSODInference:
         else:
             self.model.load_state_dict(checkpoint)
         
-        # Enable multi-GPU for inference if available
+        # Note: Multi-GPU with DataParallel doesn't work well with mixed tensor/list data structures
+        # Used in FSOD (support_boxes is a list). Use single GPU for stability.
         if self.multi_gpu:
-            print(f"✅ Found {torch.cuda.device_count()} GPUs - enabling DataParallel for inference")
-            self.model = torch.nn.DataParallel(self.model)
-            print(f"   Will use GPUs: {list(range(torch.cuda.device_count()))}")
+            print(f"⚠️  Found {torch.cuda.device_count()} GPUs but DataParallel has issues with mixed data types")
+            print(f"   Using single GPU inference for stability (GPU 0)")
+            self.multi_gpu = False
         
         self.model.eval()
         print(f"Model loaded successfully! Device: {self.device}")
-        if self.multi_gpu:
-            print(f"   Multi-GPU inference enabled")
     
     def validate_images(self, image_paths):
         """Validate that all images exist and are readable"""

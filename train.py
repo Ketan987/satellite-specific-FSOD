@@ -21,10 +21,11 @@ from models.detector import FSODDetector, compute_detection_loss
 
 def setup_multi_gpu(model, device):
     """Setup multi-GPU training if available"""
+    # Note: DataParallel doesn't work well with mixed tensor/list data structures
+    # Used in FSOD (support_boxes is a list). Single GPU training is more stable.
     if torch.cuda.device_count() > 1:
-        print(f"✅ Found {torch.cuda.device_count()} GPUs - enabling DataParallel")
-        model = torch.nn.DataParallel(model)
-        print(f"   Model will use GPUs: {list(range(torch.cuda.device_count()))}")
+        print(f"⚠️  Found {torch.cuda.device_count()} GPUs but DataParallel has issues with mixed data types")
+        print(f"   Using single GPU training for stability (GPU 0)")
     return model
 
 
@@ -236,17 +237,13 @@ def main(args):
             if val_map > best_val_loss:
                 best_val_loss = val_map
                 best_path = os.path.join(config.CHECKPOINT_DIR, 'best_model.pth')
-                # Handle DataParallel wrapper
-                model_state = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
-                torch.save(model_state, best_path)
+                torch.save(model.state_dict(), best_path)
                 print(f"Saved best model with val mAP: {val_map:.4f}")
     
     # Save final model
     os.makedirs(config.CHECKPOINT_DIR, exist_ok=True)  # Ensure directory exists
     final_path = os.path.join(config.CHECKPOINT_DIR, 'final_model.pth')
-    # Handle DataParallel wrapper
-    model_state = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
-    torch.save(model_state, final_path)
+    torch.save(model.state_dict(), final_path)
     
     # Compute final mAP@50 on validation set
     print("\n" + "="*70)
