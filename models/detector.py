@@ -304,8 +304,15 @@ def compute_detection_loss(predictions, target_boxes, target_labels, iou_thresho
         if pos_mask.sum() > 0:
             matched_gt_idxs = gt_indices[pos_mask]
             matched_labels = gt_labels[matched_gt_idxs]
-            # Shift to 1-indexed (0 is background)
-            targets[pos_mask] = matched_labels + 1
+            
+            # Ensure matched_labels are valid (should be 0..n_way-1)
+            if isinstance(matched_labels, torch.Tensor):
+                matched_labels = torch.clamp(matched_labels, 0, n_way - 1)
+            
+            # Shift to 1-indexed (0 is background), but ensure it doesn't exceed n_way
+            shifted_labels = matched_labels + 1
+            shifted_labels = torch.clamp(shifted_labels, 0, n_way)
+            targets[pos_mask] = shifted_labels
 
         # Classification loss
         if use_focal:
@@ -340,8 +347,16 @@ def focal_loss_ce(class_logits, targets, alpha=0.25, gamma=2.0):
         alpha: weighting for background (0.25)
         gamma: focusing parameter (2.0)
     """
+    # Validate targets are in valid range
+    num_classes = class_logits.shape[1]
+    if targets.max() >= num_classes or targets.min() < 0:
+        # Clamp invalid targets to valid range
+        targets = torch.clamp(targets, 0, num_classes - 1)
+    
     log_probs = F.log_softmax(class_logits, dim=-1)
-    log_p_t = log_probs.gather(1, targets.unsqueeze(1)).squeeze(1)  # [N]
+    # Use clamp to ensure valid indices
+    valid_targets = torch.clamp(targets, 0, num_classes - 1).unsqueeze(1)
+    log_p_t = log_probs.gather(1, valid_targets).squeeze(1)  # [N]
     p_t = torch.exp(log_p_t)  # [N]
     
     # Focal weight: focus on hard examples
@@ -354,50 +369,66 @@ def focal_loss_ce(class_logits, targets, alpha=0.25, gamma=2.0):
 
 
 def compute_iou_matrix(boxes1, boxes2):
-    """Compute IoU matrix between two sets of boxes"""
+    """Compute IoU matrix between two sets of boxes with safety checks"""
     N, M = len(boxes1), len(boxes2)
     device = boxes1.device if isinstance(boxes1, torch.Tensor) else 'cpu'
-    ious = torch.zeros(N, M, device=device)
+    ious = torch.zeros(N, M, device=device, dtype=torch.float32)
+    
+    if N == 0 or M == 0:
+        return ious
     
     for i in range(N):
         for j in range(M):
-            iou = compute_box_iou(boxes1[i], boxes2[j])
-            ious[i, j] = iou
+            try:
+                iou = compute_box_iou(boxes1[i], boxes2[j])
+                ious[i, j] = max(0.0, min(1.0, float(iou)))  # Clamp to [0, 1]
+            except Exception as e:
+                # On error, assign 0 IoU
+                ious[i, j] = 0.0
     
     return ious
 
 
 def compute_box_iou(box1, box2):
-    """Compute IoU between two boxes in [x, y, w, h] format"""
-    # Handle tensor conversion
-    x1 = box1[0].item() if isinstance(box1[0], torch.Tensor) else float(box1[0])
-    y1 = box1[1].item() if isinstance(box1[1], torch.Tensor) else float(box1[1])
-    w1 = box1[2].item() if isinstance(box1[2], torch.Tensor) else float(box1[2])
-    h1 = box1[3].item() if isinstance(box1[3], torch.Tensor) else float(box1[3])
+    """Compute IoU between two boxes in [x, y, w, h] format with safety checks"""
+    # Handle tensor conversion with validation
+    try:
+        x1 = box1[0].item() if isinstance(box1[0], torch.Tensor) else float(box1[0])
+        y1 = box1[1].item() if isinstance(box1[1], torch.Tensor) else float(box1[1])
+        w1 = box1[2].item() if isinstance(box1[2], torch.Tensor) else float(box1[2])
+        h1 = box1[3].item() if isinstance(box1[3], torch.Tensor) else float(box1[3])
+        
+        x2 = box2[0].item() if isinstance(box2[0], torch.Tensor) else float(box2[0])
+        y2 = box2[1].item() if isinstance(box2[1], torch.Tensor) else float(box2[1])
+        w2 = box2[2].item() if isinstance(box2[2], torch.Tensor) else float(box2[2])
+        h2 = box2[3].item() if isinstance(box2[3], torch.Tensor) else float(box2[3])
+        
+        # Validate boxes have positive dimensions
+        if w1 <= 0 or h1 <= 0 or w2 <= 0 or h2 <= 0:
+            return 0.0
+        
+        # Convert to [x1, y1, x2, y2]
+        box1_x2, box1_y2 = x1 + w1, y1 + h1
+        box2_x2, box2_y2 = x2 + w2, y2 + h2
+        
+        # Intersection
+        inter_x1 = max(x1, x2)
+        inter_y1 = max(y1, y2)
+        inter_x2 = min(box1_x2, box2_x2)
+        inter_y2 = min(box1_y2, box2_y2)
+        
+        inter_area = max(0, inter_x2 - inter_x1) * max(0, inter_y2 - inter_y1)
+        
+        # Union
+        box1_area = w1 * h1
+        box2_area = w2 * h2
+        union_area = box1_area + box2_area - inter_area
+        
+        if union_area <= 0:
+            return 0.0
+        
+        iou = inter_area / union_area
+        return max(0.0, min(1.0, iou))  # Clamp to [0, 1]
     
-    x2 = box2[0].item() if isinstance(box2[0], torch.Tensor) else float(box2[0])
-    y2 = box2[1].item() if isinstance(box2[1], torch.Tensor) else float(box2[1])
-    w2 = box2[2].item() if isinstance(box2[2], torch.Tensor) else float(box2[2])
-    h2 = box2[3].item() if isinstance(box2[3], torch.Tensor) else float(box2[3])
-    
-    # Convert to [x1, y1, x2, y2]
-    box1_x2, box1_y2 = x1 + w1, y1 + h1
-    box2_x2, box2_y2 = x2 + w2, y2 + h2
-    
-    # Intersection
-    inter_x1 = max(x1, x2)
-    inter_y1 = max(y1, y2)
-    inter_x2 = min(box1_x2, box2_x2)
-    inter_y2 = min(box1_y2, box2_y2)
-    
-    inter_area = max(0, inter_x2 - inter_x1) * max(0, inter_y2 - inter_y1)
-    
-    # Union
-    box1_area = w1 * h1
-    box2_area = w2 * h2
-    union_area = box1_area + box2_area - inter_area
-    
-    if union_area == 0:
+    except Exception as e:
         return 0.0
-    
-    return inter_area / union_area
