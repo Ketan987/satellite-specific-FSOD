@@ -22,6 +22,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
+# Copy entrypoint script
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
 # Create directories for data and output
 RUN mkdir -p /app/data/support_images \
     && mkdir -p /app/data/query_images \
@@ -32,9 +36,6 @@ RUN mkdir -p /app/data/support_images \
 ENV PYTHONUNBUFFERED=1
 ENV DEVICE=cpu
 
-# Expose port for potential API usage (optional)
-EXPOSE 8000
-
-# Default command: inference in single mode
-# Users can override this with their own commands
-CMD ["python3", "inference.py", "--help"]
+# Use entrypoint script
+ENTRYPOINT ["/app/entrypoint.sh"]
+CMD ["help"]

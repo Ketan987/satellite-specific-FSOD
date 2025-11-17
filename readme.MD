@@ -14,87 +14,164 @@ A lightweight Few-Shot Object Detection system using ResNet-50 backbone with COC
 
 ## Project Structure
 
+# FSOD - Few-Shot Object Detection
+
+A production-ready Few-Shot Object Detection system using ResNet-50 backbone with COCO-style annotations. Designed for efficient learning from minimal training examples.
+
+## 🎯 Features
+
+- ✅ **ResNet-50 Backbone** - Pretrained ImageNet feature extractor
+- ✅ **COCO Format Support** - Standard JSON annotations with JPEG images
+- ✅ **N-way K-shot Learning** - Episodic training for generalization (default: 5-way, 3-shot)
+- ✅ **Similarity Matching** - Cosine similarity with temperature scaling
+- ✅ **Efficient ROI Pooling** - Fixed-size region feature extraction
+- ✅ **Robust Detection Pipeline** - Focal loss for class imbalance, NMS post-processing
+- ✅ **Two Inference Modes** - Single image with visualization, batch with CSV output
+- ✅ **Docker Support** - Containerized training and inference
+- ✅ **Comprehensive Architecture Verification** - Tested edge cases and numerical stability
+
+## 📦 Project Structure
+
 ```
-fsod_project/
-├── config.py                 # Configuration parameters
-├── train.py                  # Training script
-├── inference.py              # Inference script
-├── example_usage.py          # Usage examples
+fsod/
+├── README.md                      # This file
+├── requirements.txt               # Python dependencies
+├── config.py                      # Configuration parameters
+├── train.py                       # Training script
+├── inference.py                   # Inference script (single/batch modes)
+├── example_usage.py               # Usage examples
+│
 ├── models/
-│   ├── backbone.py          # ResNet-50 feature extractor
-│   ├── detector.py          # Main FSOD detector
-│   └── similarity.py        # Similarity matching
+│   ├── backbone.py               # ResNet-50 + FeatureEmbedding + ROIPooling
+│   ├── detector.py               # Main FSODDetector orchestrator
+│   └── similarity.py             # SimilarityMatcher + ProposalGenerator + NMS
+│
 ├── utils/
-│   ├── coco_utils.py        # COCO dataset utilities
-│   └── data_loader.py       # Data loading and preprocessing
+│   ├── coco_utils.py             # COCO dataset loading
+│   ├── data_loader.py            # Data loading and episodic sampling
+│   └── metrics.py                # mAP computation
+│
+├── tests/
+│   ├── comprehensive_test.py     # Full pipeline tests
+│   └── smoke_test.py             # Basic sanity checks
+│
 ├── data/
-│   ├── train_coco.json      # Training annotations
-│   ├── val_coco.json        # Validation annotations
-│   ├── train_images/        # Training images (JPEG)
-│   └── val_images/          # Validation images (JPEG)
-├── checkpoints/             # Model checkpoints
-└── README.md
+│   ├── train_coco.json           # Training COCO annotations
+│   ├── val_coco.json             # Validation COCO annotations
+│   ├── train_images/             # Training images (JPEG)
+│   └── val_images/               # Validation images (JPEG)
+│
+├── checkpoints/                   # Model checkpoints
+├── documentation/
+│   ├── INFERENCE_GUIDE.md        # Detailed inference documentation
+│   ├── DOCKER_SETUP.md           # Docker usage guide
+│   └── ARCHITECTURE_VERIFICATION.md  # Architecture validation report
+│
+├── Docker files
+│   ├── Dockerfile                # Docker image definition
+│   ├── docker-compose.yml        # Docker Compose configuration
+│   ├── docker.sh                 # Docker helper script
+│   └── entrypoint.sh             # Container entrypoint
 ```
 
-## Installation
+## 🚀 Quick Start
 
-### Requirements
+### Prerequisites
+- Python 3.8+
+- pip or conda package manager
+- GPU with CUDA 11.8+ (optional, CPU works fine for testing)
 
+### Installation
+
+1. **Clone and navigate to the repository**
 ```bash
-pip install torch torchvision pillow numpy tqdm
+cd /path/to/fsod
 ```
 
-### Python Version
-- Python 3.7+
-- PyTorch 1.8+
-- CUDA (optional, for GPU support)
+2. **Create virtual environment**
+```bash
+python3 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+```
 
-## Data Format
+3. **Install dependencies**
+```bash
+pip install --upgrade pip
+pip install -r requirements.txt
+```
 
-### COCO-style Annotation Format
+4. **Verify installation**
+```bash
+python -c "import torch; print(f'PyTorch {torch.__version__}')"
+```
 
+## 📊 Data Format
+
+### COCO Annotation Format
+
+FSOD requires COCO-style JSON annotations. Each dataset consists of:
+
+```
+data/
+├── train_coco.json              # Training annotations
+├── val_coco.json                # Validation annotations
+├── train_images/                # Training images (JPEG only)
+└── val_images/                  # Validation images (JPEG only)
+```
+
+**COCO JSON Structure:**
 ```json
 {
   "images": [
-    {
-      "id": 1,
-      "file_name": "image001.jpg",
-      "width": 640,
-      "height": 480
-    }
+    {"id": 1, "file_name": "image001.jpg", "width": 640, "height": 480}
   ],
   "annotations": [
     {
       "id": 1,
       "image_id": 1,
       "category_id": 1,
-      "bbox": [100, 150, 200, 250],
+      "bbox": [x, y, width, height],
       "area": 50000,
       "iscrowd": 0
     }
   ],
   "categories": [
-    {
-      "id": 1,
-      "name": "cat",
-      "supercategory": "animal"
-    }
+    {"id": 1, "name": "cat", "supercategory": "animal"}
   ]
 }
 ```
 
 **Important Notes:**
-- Bounding boxes are in `[x, y, width, height]` format
-- All images must be in **JPEG format** (.jpg or .jpeg)
-- Images should be placed in the corresponding directories
+- Bounding boxes are in `[x, y, width, height]` format (top-left corner + dimensions)
+- **Only JPEG images are supported** (.jpg or .jpeg extensions)
+- Image must exist in the corresponding directory
+- At least N_WAY unique classes recommended (default 5)
+- K_SHOT examples per class recommended (default 3)
 
-## Training
+## 🏋️ Training
 
-### Basic Training
+### Basic Training (CPU - Good for Testing)
 
 ```bash
-python train.py
+# Activate virtual environment
+source venv/bin/activate
+
+# Train for 100 episodes on CPU
+python train.py --device cpu --num_episodes 100 --pretrained
 ```
+
+**Estimated time:** 5-10 minutes on CPU
+
+### Full Training (GPU - Recommended)
+
+```bash
+source venv/bin/activate
+
+# Train for 10000 episodes on GPU
+python train.py --device cuda --num_episodes 10000 --pretrained
+```
+
+**Estimated time:** 2-5 hours on GPU
 
 ### Configuration
 
@@ -102,244 +179,264 @@ Edit `config.py` to adjust training parameters:
 
 ```python
 # Few-shot parameters
-N_WAY = 5           # Number of classes per episode
-K_SHOT = 5          # Number of support examples per class
-QUERY_SAMPLES = 10  # Number of query samples per episode
+N_WAY = 5               # Number of classes per episode
+K_SHOT = 3              # Support examples per class
+QUERY_SAMPLES = 10      # Query examples per class
 
 # Training parameters
 NUM_EPISODES = 10000
 LEARNING_RATE = 1e-4
-BATCH_SIZE = 4
+BATCH_SIZE = 1          # Per-episode
 
 # Image parameters
 IMAGE_SIZE = 512
 ```
 
-### Monitor Training
+### Monitoring Training
 
-The training script will:
-- Log loss every 100 episodes
-- Validate every 1000 episodes
-- Save checkpoints every 1000 episodes
-- Save the best model based on validation loss
+The training script automatically:
+- Logs loss every 100 episodes
+- Validates every 1000 episodes
+- Saves checkpoints every 1000 episodes
+- Saves best model based on validation mAP
 
-## Inference
+Output: `checkpoints/best_model.pth`
 
-### Method 1: Using the Inference Class
+## 🎯 Inference
 
-```python
-from inference import FSODInference
+### Two Inference Modes
 
-# Initialize
-inferencer = FSODInference(
-    model_path='checkpoints/best_model.pth',
-    device='cuda'  # or 'cpu'
-)
+FSOD provides two inference modes optimized for different workflows:
 
-# Define support set (5-shot example)
-support_set = [
-    {
-        'image_path': 'support/cat1.jpg',
-        'bbox': [50, 60, 120, 150],  # [x, y, width, height]
-        'class_name': 'cat'
-    },
-    {
-        'image_path': 'support/cat2.jpg',
-        'bbox': [30, 40, 110, 140],
-        'class_name': 'cat'
-    },
-    # Add more support examples...
-]
+#### Mode 1: Single Image (With Visualization)
 
-# Run detection
-detections = inferencer.detect(
-    support_set=support_set,
-    query_image='query/test.jpg',
-    score_threshold=0.3,
-    nms_threshold=0.4,
-    max_detections=100
-)
-
-# Print results
-for det in detections:
-    print(f"BBox: {det['bbox']}")
-    print(f"Score: {det['similarity_score']:.4f}")
-    print(f"Class: {det['class_name']}")
-```
-
-### Method 2: Command Line
+Process one query image and automatically annotate detections:
 
 ```bash
-python inference.py \
-    --model_path checkpoints/best_model.pth \
-    --query_image query/test.jpg \
-    --support_image1 support/cat1.jpg \
-    --support_bbox1 50 60 120 150 \
-    --class_name cat \
-    --score_threshold 0.3 \
-    --output results.json
+source venv/bin/activate
+
+python inference.py --mode single \
+  --model_path checkpoints/best_model.pth \
+  --support_img cat1.jpg cat2.jpg cat3.jpg \
+  --support_classes cat cat cat \
+  --query_image test_image.jpg \
+  --output_dir output/ \
+  --device cpu
 ```
 
-## Output Format
+**Output:**
+- `output/test_image_detected.jpg` - Annotated image with bounding boxes
+- Console table with detection coordinates and scores
 
-The detection output follows this format:
+#### Mode 2: Batch Processing (CSV Output)
 
-```json
-{
-  "image_path": "query/test_image.jpg",
-  "detections": [
-    {
-      "bbox": [150.5, 200.3, 250.8, 350.6],
-      "similarity_score": 0.8523,
-      "class_name": "cat"
-    },
-    {
-      "bbox": [400.2, 150.7, 200.5, 280.4],
-      "similarity_score": 0.7891,
-      "class_name": "cat"
-    }
-  ]
-}
+Process multiple images and save results to CSV:
+
+```bash
+source venv/bin/activate
+
+python inference.py --mode batch \
+  --model_path checkpoints/best_model.pth \
+  --support_img dog1.jpg dog2.jpg \
+  --support_classes dog dog \
+  --query_dir data/test_images/ \
+  --output_csv results.csv \
+  --device cpu
 ```
 
-**Field Descriptions:**
-- `bbox`: Bounding box in `[x, y, width, height]` format
-- `similarity_score`: Similarity score between 0 and 1 (higher is better)
-- `class_name`: Predicted class name from support set
-
-## Advanced Usage
+**Output CSV Format:**
+```
+x_min,y_min,x_max,y_max,filename,class_name,similarity_score
+100.5,150.2,250.8,300.1,image001.jpg,dog,0.8723
+50.1,75.3,180.9,200.5,image001.jpg,dog,0.7654
+```
 
 ### Multi-Class Detection
 
-```python
-# Support set with multiple classes (N-way)
-support_set = [
-    # Cat examples
-    {'image_path': 'cat1.jpg', 'bbox': [50, 60, 120, 150], 'class_name': 'cat'},
-    {'image_path': 'cat2.jpg', 'bbox': [30, 40, 110, 140], 'class_name': 'cat'},
-    
-    # Dog examples
-    {'image_path': 'dog1.jpg', 'bbox': [40, 50, 130, 160], 'class_name': 'dog'},
-    {'image_path': 'dog2.jpg', 'bbox': [55, 65, 125, 155], 'class_name': 'dog'},
-]
+Detect multiple object classes simultaneously:
 
-detections = inferencer.detect(support_set, 'query.jpg')
+```bash
+python inference.py --mode batch \
+  --model_path checkpoints/best_model.pth \
+  --support_img cat1.jpg cat2.jpg dog1.jpg dog2.jpg bird1.jpg \
+  --support_classes cat cat dog dog bird \
+  --query_dir data/test_images/ \
+  --output_csv multi_class_results.csv
 ```
 
-### Batch Processing
+### Detection Parameters
 
-```python
-query_images = ['img1.jpg', 'img2.jpg', 'img3.jpg']
+Fine-tune detection behavior with these parameters:
 
-results = inferencer.detect_batch(
-    support_set=support_set,
-    query_images=query_images,
-    score_threshold=0.35
-)
+- `--score_threshold` (default: 0.3) - Confidence threshold (0-1)
+  - Lower = more detections (may include false positives)
+  - Higher = only confident detections
+- `--nms_threshold` (default: 0.4) - NMS IoU threshold
+- `--max_detections` (default: 100) - Maximum detections per image
+- `--device` - 'cpu' or 'cuda'
 
-# Save results
-inferencer.save_results(results, 'batch_results.json')
+**For detailed usage examples, see:** [documentation/INFERENCE_GUIDE.md](documentation/INFERENCE_GUIDE.md)
+
+## 🐳 Docker Support
+
+FSOD includes Docker support for easy containerized training and inference.
+
+### Build Docker Image
+
+```bash
+docker build -t fsod-inference .
+
+# Or with docker-compose
+docker-compose build
 ```
 
-## Model Architecture
+### Run with Docker
+
+```bash
+# Single image inference
+docker-compose run --rm fsod python3 inference.py \
+  --mode single \
+  --model_path checkpoints/best_model.pth \
+  --support_img data/support.jpg \
+  --query_image data/query.jpg
+
+# Batch inference
+docker-compose run --rm fsod python3 inference.py \
+  --mode batch \
+  --model_path checkpoints/best_model.pth \
+  --support_img data/cat1.jpg data/cat2.jpg \
+  --query_dir data/images/ \
+  --output_csv results.csv
+
+# Training
+docker-compose run --rm fsod python3 train.py \
+  --device cpu --num_episodes 100
+```
+
+**For detailed Docker setup:** [documentation/DOCKER_SETUP.md](documentation/DOCKER_SETUP.md)
+
+## 🏗️ Model Architecture
 
 ```
 Input Images (Support & Query)
     ↓
-ResNet-50 Backbone
+ResNet-50 Backbone [pretrained, stride 32]
     ↓
-Feature Embedding (512-dim)
+Feature Embedding [2048-dim → 512-dim via 1×1 convolutions]
     ↓
-ROI Pooling
+ROI Pooling [extract 7×7 regions from each bounding box]
     ↓
-Detection Head
+Detection Head [FC layers: 25088 → 1024 → 512]
     ↓
-Similarity Matching ←→ Support Features
+Three Output Heads:
+  ├─ Box Regressor      [512 → 4 deltas]
+  ├─ Objectness Head    [512 → 1 score]
+  └─ Similarity Matcher [cosine similarity to support features]
     ↓
-Bounding Box Regression + Objectness
+Post-processing [NMS + score thresholding]
     ↓
-NMS & Post-processing
-    ↓
-Final Detections (bbox + similarity score)
+Final Detections [bboxes + similarity scores + class names]
 ```
 
-## Key Components
+**Key Components:**
+- **Backbone**: ResNet-50 pretrained on ImageNet
+- **Feature Embedding**: Reduces feature dimensionality for efficiency
+- **ROI Pooling**: Extracts fixed-size features from proposals
+- **Similarity Matching**: Computes cosine similarity with temperature scaling
+- **NMS**: Non-maximum suppression to remove duplicates
+- **Training Loss**: Focal loss (class imbalance) + Smooth L1 (box regression)
 
-1. **Backbone**: ResNet-50 pretrained on ImageNet
-2. **Feature Embedding**: Projects 2048-dim features to 512-dim
-3. **ROI Pooling**: Extracts fixed-size features from bounding boxes
-4. **Similarity Matcher**: Computes cosine similarity between support and query
-5. **Detection Head**: Predicts objectness and refines bounding boxes
-6. **NMS**: Removes duplicate detections
+## ⚙️ Performance Optimization
 
-## Performance Tips
+### Memory Usage
+- **Training**: ~4-6 GB GPU VRAM for default settings
+- **Inference**: ~2-3 GB GPU VRAM
 
-1. **GPU Memory**: Reduce `IMAGE_SIZE` if running out of memory
-2. **Training Speed**: Use smaller `NUM_EPISODES` for faster experimentation
-3. **Detection Quality**: 
-   - Increase `K_SHOT` for better accuracy
-   - Adjust `score_threshold` based on your needs
-   - Use diverse support examples
+If out of memory, adjust in `config.py`:
+```python
+IMAGE_SIZE = 384      # Reduce from 512
+K_SHOT = 2            # Reduce from 3
+NUM_EPISODES = 5000   # Reduce from 10000
+```
 
-## Limitations
+### Speed
+- **CPU Training**: ~5-10 sec/episode (100 episodes ≈ 10 min)
+- **GPU Training**: ~0.5-1 sec/episode (10000 episodes ≈ 2-5 hours)
+- **CPU Inference**: ~2-5 sec/image
+- **GPU Inference**: ~0.1-0.3 sec/image
 
-- **JPEG only**: Only JPEG/JPG images are supported
-- **Single scale**: Detection at single scale (no multi-scale)
-- **Memory**: Requires GPU with at least 6GB VRAM for training
-- **Speed**: ~2-5 FPS on GPU for inference (can be optimized)
+## 🐛 Troubleshooting
 
-## Troubleshooting
+| Problem | Solution |
+|---------|----------|
+| **CUDA out of memory** | Reduce `IMAGE_SIZE` or use CPU mode |
+| **Poor detection results** | Increase `K_SHOT`, use better support images, lower `score_threshold` |
+| **Image format error** | Ensure all images are JPEG (.jpg or .jpeg) |
+| **No detections found** | Lower `score_threshold` (try 0.1-0.2), check model training |
+| **Slow training** | Use GPU (`--device cuda`), reduce `NUM_EPISODES` |
+| **Docker permission errors** | Run `chmod 777 output/` |
 
-### Issue: CUDA out of memory
-**Solution**: Reduce `IMAGE_SIZE` or `BATCH_SIZE` in config
+## 📚 Additional Resources
 
-### Issue: Poor detection results
-**Solution**: 
-- Check support set quality (clear objects, good bounding boxes)
-- Increase `K_SHOT` (more support examples)
-- Adjust `score_threshold`
-- Train for more episodes
+- **Detailed Inference Guide**: [documentation/INFERENCE_GUIDE.md](documentation/INFERENCE_GUIDE.md)
+- **Docker Setup Guide**: [documentation/DOCKER_SETUP.md](documentation/DOCKER_SETUP.md)
+- **Architecture Verification Report**: [documentation/ARCHITECTURE_VERIFICATION.md](documentation/ARCHITECTURE_VERIFICATION.md)
 
-### Issue: Invalid image format error
-**Solution**: Ensure all images are JPEG format (.jpg or .jpeg)
+## 📋 Requirements
 
-## Example Workflow
+- Python 3.8+
+- PyTorch 2.0+
+- TorchVision 0.15+
+- NumPy 1.24+
+- Pillow 10.0+
+- tqdm 4.65+
+
+See `requirements.txt` for exact versions.
+
+## 📝 Example Workflow
 
 ```bash
-# 1. Prepare data
-# - Create train_coco.json and val_coco.json
-# - Place JPEG images in train_images/ and val_images/
+# 1. Setup
+source venv/bin/activate
 
-# 2. Train model
-python train.py
+# 2. Prepare COCO data
+# - Create data/train_coco.json and data/val_coco.json
+# - Place JPEG images in data/train_images/ and data/val_images/
 
-# 3. Run inference
-python example_usage.py
+# 3. Train model
+python train.py --device cuda --num_episodes 10000 --pretrained
 
-# 4. Evaluate results
-# Check results.json for detection outputs
+# 4. Run inference
+python inference.py --mode batch \
+  --model_path checkpoints/best_model.pth \
+  --support_img support/cat1.jpg support/cat2.jpg \
+  --query_dir data/test_images/ \
+  --output_csv results.csv
+
+# 5. Evaluate results (results.csv contains all detections)
 ```
 
-## Citation
+## 📄 Citation
 
-If you use this code, please cite:
+If you use FSOD in your research, please cite:
 
-```
-@misc{fsod-lightweight,
-  title={Lightweight Few-Shot Object Detection with ResNet-50},
+```bibtex
+@software{fsod2024,
+  title={FSOD: Few-Shot Object Detection},
   author={Your Name},
-  year={2024}
+  year={2024},
+  url={https://github.com/yourusername/fsod}
 }
 ```
 
-## License
+## 📜 License
 
-MIT License
+This project is licensed under the MIT License - see LICENSE file for details.
 
-## Contributing
+## 🤝 Contributing
 
-Contributions are welcome! Please open an issue or submit a pull request.
+Contributions are welcome! Please feel free to submit a Pull Request.
 
-## Contact
+## ❓ Support
 
-For questions or issues, please open a GitHub issue.
+For issues or questions, please open an GitHub issue or check the troubleshooting section above.
