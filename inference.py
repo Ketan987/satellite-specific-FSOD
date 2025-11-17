@@ -166,7 +166,7 @@ class FSODInference:
 
         # Prepare support boxes as list of tensors
         support_boxes_list = [
-            torch.tensor([b], dtype=torch.float32).to(self.device)
+            torch.tensor([b], dtype=torch.float32, device=self.device)
             for b in support_bboxes
         ]
 
@@ -178,7 +178,7 @@ class FSODInference:
                 class_to_idx[class_name] = len(class_to_idx)
             support_labels_list.append(class_to_idx[class_name])
         
-        support_labels = torch.tensor(support_labels_list, dtype=torch.long).to(self.device)
+        support_labels = torch.tensor(support_labels_list, dtype=torch.long, device=self.device)
         n_way = len(class_to_idx)
 
         # Run detection

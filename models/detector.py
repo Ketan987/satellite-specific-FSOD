@@ -96,7 +96,10 @@ class FSODDetector(nn.Module):
         # (one label per support image, but ROI pooling may produce multiple features per image)
         support_box_labels = []
         for img_idx, boxes in enumerate(support_boxes):
-            support_box_labels.extend([support_labels[img_idx]] * len(boxes))
+            # boxes is a tensor, boxes.shape[0] is number of boxes
+            num_boxes = boxes.shape[0] if isinstance(boxes, torch.Tensor) else len(boxes)
+            label_val = support_labels[img_idx].item() if isinstance(support_labels[img_idx], torch.Tensor) else support_labels[img_idx]
+            support_box_labels.extend([label_val] * num_boxes)
         support_box_labels = torch.tensor(support_box_labels, dtype=support_labels.dtype, device=support_labels.device)        # Generate proposals for query images
         Q, _, H, W = query_features.shape
         feature_map_size = (query_features.shape[2], query_features.shape[3])
@@ -104,13 +107,13 @@ class FSODDetector(nn.Module):
         all_predictions = []
         
         for q in range(Q):
-            # Generate proposals
+            # Generate proposals on correct device
             proposals = self.proposal_generator.generate_proposals(
-                feature_map_size, self.image_size
+                feature_map_size, self.image_size, device=query_features.device
             )
             
             # Convert to boxes
-            proposal_boxes = self.proposal_generator.proposals_to_boxes(proposals)
+            proposal_boxes = self.proposal_generator.proposals_to_boxes(proposals, device=query_features.device)
             
             # Extract features for proposals
             query_roi_features = self.extract_roi_features(
@@ -190,11 +193,9 @@ class FSODDetector(nn.Module):
         refined[:, 3] = torch.clamp(refined[:, 3], 1.0, float(self.image_size))
         
         # Clamp center coordinates to valid region
-        # Need to compute max values carefully to avoid tensor in clamp
-        max_x = (float(self.image_size) - refined[:, 2]).clamp(min=0)
-        max_y = (float(self.image_size) - refined[:, 3]).clamp(min=0)
-        refined[:, 0] = torch.max(torch.zeros_like(refined[:, 0]), torch.min(refined[:, 0], max_x))
-        refined[:, 1] = torch.max(torch.zeros_like(refined[:, 1]), torch.min(refined[:, 1], max_y))
+        # Avoid mixing tensors and scalars in clamp
+        refined[:, 0] = torch.clamp(refined[:, 0], 0.0, float(self.image_size) - 1.0)
+        refined[:, 1] = torch.clamp(refined[:, 1], 0.0, float(self.image_size) - 1.0)
         
         return refined
     
@@ -355,7 +356,8 @@ def focal_loss_ce(class_logits, targets, alpha=0.25, gamma=2.0):
 def compute_iou_matrix(boxes1, boxes2):
     """Compute IoU matrix between two sets of boxes"""
     N, M = len(boxes1), len(boxes2)
-    ious = torch.zeros(N, M)
+    device = boxes1.device if isinstance(boxes1, torch.Tensor) else 'cpu'
+    ious = torch.zeros(N, M, device=device)
     
     for i in range(N):
         for j in range(M):
@@ -367,8 +369,16 @@ def compute_iou_matrix(boxes1, boxes2):
 
 def compute_box_iou(box1, box2):
     """Compute IoU between two boxes in [x, y, w, h] format"""
-    x1, y1, w1, h1 = box1
-    x2, y2, w2, h2 = box2
+    # Handle tensor conversion
+    x1 = box1[0].item() if isinstance(box1[0], torch.Tensor) else float(box1[0])
+    y1 = box1[1].item() if isinstance(box1[1], torch.Tensor) else float(box1[1])
+    w1 = box1[2].item() if isinstance(box1[2], torch.Tensor) else float(box1[2])
+    h1 = box1[3].item() if isinstance(box1[3], torch.Tensor) else float(box1[3])
+    
+    x2 = box2[0].item() if isinstance(box2[0], torch.Tensor) else float(box2[0])
+    y2 = box2[1].item() if isinstance(box2[1], torch.Tensor) else float(box2[1])
+    w2 = box2[2].item() if isinstance(box2[2], torch.Tensor) else float(box2[2])
+    h2 = box2[3].item() if isinstance(box2[3], torch.Tensor) else float(box2[3])
     
     # Convert to [x1, y1, x2, y2]
     box1_x2, box1_y2 = x1 + w1, y1 + h1

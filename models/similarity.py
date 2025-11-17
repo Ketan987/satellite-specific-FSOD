@@ -101,13 +101,14 @@ class ProposalGenerator(nn.Module):
                 anchors.append([w, h])
         return torch.tensor(anchors, dtype=torch.float32)
     
-    def generate_proposals(self, feature_map_size, image_size):
+    def generate_proposals(self, feature_map_size, image_size, device='cuda'):
         """
         Generate proposal boxes with subsampling for efficiency
         
         Args:
             feature_map_size: (H, W) of feature map
             image_size: Original image size
+            device: Device to create tensors on
         
         Returns:
             proposals: [N, 4] boxes in [x_center, y_center, w, h]
@@ -133,18 +134,20 @@ class ProposalGenerator(nn.Module):
                 for anchor_w, anchor_h in self.anchors:
                     proposals.append([cx, cy, anchor_w, anchor_h])
         
-        return torch.tensor(proposals, dtype=torch.float32)
+        return torch.tensor(proposals, dtype=torch.float32, device=device)
     
-    def proposals_to_boxes(self, proposals):
+    def proposals_to_boxes(self, proposals, device=None):
         """
         Convert proposals [cx, cy, w, h] to boxes [x, y, w, h]
         """
+        if device is None:
+            device = proposals.device
         boxes = proposals.clone()
         boxes[:, 0] = proposals[:, 0] - proposals[:, 2] / 2  # x
         boxes[:, 1] = proposals[:, 1] - proposals[:, 3] / 2  # y
         boxes[:, 2] = proposals[:, 2]  # w
         boxes[:, 3] = proposals[:, 3]  # h
-        return boxes
+        return boxes.to(device)
 
 
 def non_max_suppression(boxes, scores, iou_threshold=0.5):
