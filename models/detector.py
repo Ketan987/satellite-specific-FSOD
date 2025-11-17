@@ -31,10 +31,10 @@ class FSODDetector(nn.Module):
         # Detection head
         self.detection_head = nn.Sequential(
             nn.Linear(embed_dim * 7 * 7, 1024),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=False),
             nn.Dropout(0.5),
             nn.Linear(1024, 512),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=False),
         )
         
         # Box refinement
@@ -177,25 +177,27 @@ class FSODDetector(nn.Module):
     
     def apply_box_deltas(self, boxes, deltas):
         """Apply box regression deltas with constrained refinement."""
-        refined = boxes.clone().float()
-        
+        # Don't clone here - create new tensor to avoid in-place ops
         # Constrain box regression deltas to avoid explosion
-        deltas = torch.clamp(deltas, -0.5, 0.5)
+        deltas_clamped = torch.clamp(deltas, -0.5, 0.5)
         
         # Apply delta: dx, dy are relative to box size; dw, dh are log-ratios
-        refined[:, 0] = refined[:, 0] + deltas[:, 0] * refined[:, 2] * 0.1  # x
-        refined[:, 1] = refined[:, 1] + deltas[:, 1] * refined[:, 3] * 0.1  # y
-        refined[:, 2] = refined[:, 2] * torch.exp(torch.clamp(deltas[:, 2], -0.2, 0.2))  # w
-        refined[:, 3] = refined[:, 3] * torch.exp(torch.clamp(deltas[:, 3], -0.2, 0.2))  # h
+        # Use torch.stack to create new tensor instead of in-place assignment
+        refined_x = boxes[:, 0] + deltas_clamped[:, 0] * boxes[:, 2] * 0.1  # x
+        refined_y = boxes[:, 1] + deltas_clamped[:, 1] * boxes[:, 3] * 0.1  # y
+        refined_w = boxes[:, 2] * torch.exp(torch.clamp(deltas_clamped[:, 2], -0.2, 0.2))  # w
+        refined_h = boxes[:, 3] * torch.exp(torch.clamp(deltas_clamped[:, 3], -0.2, 0.2))  # h
         
         # Enforce minimum size and image bounds
-        refined[:, 2] = torch.clamp(refined[:, 2], 1.0, float(self.image_size))
-        refined[:, 3] = torch.clamp(refined[:, 3], 1.0, float(self.image_size))
+        refined_w = torch.clamp(refined_w, 1.0, float(self.image_size))
+        refined_h = torch.clamp(refined_h, 1.0, float(self.image_size))
         
         # Clamp center coordinates to valid region
-        # Avoid mixing tensors and scalars in clamp
-        refined[:, 0] = torch.clamp(refined[:, 0], 0.0, float(self.image_size) - 1.0)
-        refined[:, 1] = torch.clamp(refined[:, 1], 0.0, float(self.image_size) - 1.0)
+        refined_x = torch.clamp(refined_x, 0.0, float(self.image_size) - 1.0)
+        refined_y = torch.clamp(refined_y, 0.0, float(self.image_size) - 1.0)
+        
+        # Stack to create refined boxes [N, 4]
+        refined = torch.stack([refined_x, refined_y, refined_w, refined_h], dim=1)
         
         return refined
     
@@ -312,7 +314,9 @@ def compute_detection_loss(predictions, target_boxes, target_labels, iou_thresho
             # Shift to 1-indexed (0 is background), but ensure it doesn't exceed n_way
             shifted_labels = matched_labels + 1
             shifted_labels = torch.clamp(shifted_labels, 0, n_way)
-            targets[pos_mask] = shifted_labels
+            
+            # Create new targets tensor using torch.where to avoid in-place ops
+            targets = torch.where(pos_mask, shifted_labels.long(), targets)
 
         # Classification loss
         if use_focal:

@@ -48,7 +48,7 @@ class FeatureEmbedding(nn.Module):
         
         self.projection = nn.Sequential(
             nn.Conv2d(in_dim, 1024, kernel_size=1),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=False),
             nn.Conv2d(1024, embed_dim, kernel_size=1),
         )
         
