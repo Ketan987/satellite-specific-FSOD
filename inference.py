@@ -24,9 +24,16 @@ from utils.data_loader import prepare_inference_data
 class FSODInference:
     """FSOD Inference wrapper with batch and single modes"""
     
-    def __init__(self, model_path, device='cpu'):
+    def __init__(self, model_path, device='cpu', multi_gpu=True):
         self.config = Config()
-        self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
+        
+        # Determine device
+        if device == 'cuda' and torch.cuda.is_available():
+            self.device = torch.device('cuda:0')  # Primary GPU
+            self.multi_gpu = multi_gpu and torch.cuda.device_count() > 1
+        else:
+            self.device = torch.device('cpu')
+            self.multi_gpu = False
         
         # Load model
         print(f"Loading model from {model_path}...")
@@ -37,15 +44,23 @@ class FSODInference:
             pretrained=False
         ).to(self.device)
         
-        # Load weights
+        # Load weights - handle both checkpoint dicts and raw state dicts
         checkpoint = torch.load(model_path, map_location=self.device)
         if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
             self.model.load_state_dict(checkpoint['model_state_dict'])
         else:
             self.model.load_state_dict(checkpoint)
         
+        # Enable multi-GPU for inference if available
+        if self.multi_gpu:
+            print(f"✅ Found {torch.cuda.device_count()} GPUs - enabling DataParallel for inference")
+            self.model = torch.nn.DataParallel(self.model)
+            print(f"   Will use GPUs: {list(range(torch.cuda.device_count()))}")
+        
         self.model.eval()
         print(f"Model loaded successfully! Device: {self.device}")
+        if self.multi_gpu:
+            print(f"   Multi-GPU inference enabled")
     
     def validate_images(self, image_paths):
         """Validate that all images exist and are readable"""
@@ -392,8 +407,8 @@ def build_support_set(args):
 def main(args):
     """Main inference function"""
     
-    # Initialize inference
-    inferencer = FSODInference(args.model_path, args.device)
+    # Initialize inference with multi-GPU support
+    inferencer = FSODInference(args.model_path, args.device, multi_gpu=not args.no_multi_gpu)
     
     # Build support set
     support_set = build_support_set(args)
@@ -481,6 +496,8 @@ EXAMPLES:
                        help="Path to trained model checkpoint")
     parser.add_argument('--device', type=str, default='cpu', choices=['cpu', 'cuda'],
                        help="Device to use (default: cpu)")
+    parser.add_argument('--no_multi_gpu', action='store_true',
+                       help="Disable multi-GPU inference (default: enabled if available)")
     
     # Support set arguments - CHOOSE ONE METHOD
     support_group = parser.add_argument_group('Support Set (choose one method)')

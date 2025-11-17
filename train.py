@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader
 import os
 import argparse
 from tqdm import tqdm
+import numpy as np
 
 # Memory optimization for Kaggle GPU
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:512'
@@ -16,6 +17,15 @@ from config import Config
 from utils.coco_utils import COCODataset
 from utils.data_loader import FSODDataset, collate_fn
 from models.detector import FSODDetector, compute_detection_loss
+
+
+def setup_multi_gpu(model, device):
+    """Setup multi-GPU training if available"""
+    if torch.cuda.device_count() > 1:
+        print(f"✅ Found {torch.cuda.device_count()} GPUs - enabling DataParallel")
+        model = torch.nn.DataParallel(model)
+        print(f"   Model will use GPUs: {list(range(torch.cuda.device_count()))}")
+    return model
 
 
 def train_episode(model, episode_data, optimizer, device):
@@ -84,9 +94,12 @@ def save_checkpoint(model, optimizer, episode, loss, checkpoint_dir):
     """Save model checkpoint"""
     os.makedirs(checkpoint_dir, exist_ok=True)
     
+    # Handle DataParallel wrapper - get the underlying model
+    model_state = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
+    
     checkpoint = {
         'episode': episode,
-        'model_state_dict': model.state_dict(),
+        'model_state_dict': model_state,
         'optimizer_state_dict': optimizer.state_dict(),
         'loss': loss,
     }
@@ -185,6 +198,9 @@ def main(args):
         except:
             pass
     
+    # Setup multi-GPU if available
+    model = setup_multi_gpu(model, device)
+    
     # Optimizer
     optimizer = optim.Adam(
         model.parameters(),
@@ -220,12 +236,60 @@ def main(args):
             if val_map > best_val_loss:
                 best_val_loss = val_map
                 best_path = os.path.join(config.CHECKPOINT_DIR, 'best_model.pth')
-                torch.save(model.state_dict(), best_path)
+                # Handle DataParallel wrapper
+                model_state = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
+                torch.save(model_state, best_path)
                 print(f"Saved best model with val mAP: {val_map:.4f}")
     
     # Save final model
+    os.makedirs(config.CHECKPOINT_DIR, exist_ok=True)  # Ensure directory exists
     final_path = os.path.join(config.CHECKPOINT_DIR, 'final_model.pth')
-    torch.save(model.state_dict(), final_path)
+    # Handle DataParallel wrapper
+    model_state = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
+    torch.save(model_state, final_path)
+    
+    # Compute final mAP@50 on validation set
+    print("\n" + "="*70)
+    print("📊 COMPUTING FINAL VALIDATION METRICS (mAP@50)")
+    print("="*70)
+    model.eval()
+    final_val_loss = 0.0
+    final_maps = []
+    
+    with torch.no_grad():
+        for i, episode_data in enumerate(tqdm(val_loader, desc="Final Validation", total=min(500, len(val_loader)))):
+            if i >= 500:  # Evaluate on up to 500 validation episodes
+                break
+            
+            support_images = episode_data['support_images'].to(device)
+            support_boxes = [boxes.to(device) for boxes in episode_data['support_boxes']]
+            support_labels = episode_data['support_labels'].to(device)
+            query_images = episode_data['query_images'].to(device)
+            query_boxes = [boxes.to(device) for boxes in episode_data['query_boxes']]
+            query_labels = [labels.to(device) for labels in episode_data['query_labels']]
+            
+            predictions = model(support_images, support_boxes, support_labels, query_images, n_way=episode_data.get('n_way', None))
+            loss = compute_detection_loss(predictions, query_boxes, query_labels)
+            final_val_loss += loss.item()
+            
+            # Compute mAP@50
+            try:
+                from utils.metrics import map_per_episode
+                ep_map = map_per_episode(predictions, query_boxes, query_labels, n_way=episode_data.get('n_way', None), iou_thr=0.5)
+                final_maps.append(ep_map)
+            except Exception as e:
+                final_maps.append(0.0)
+    
+    final_avg_loss = final_val_loss / min(500, len(val_loader))
+    final_avg_map = float(np.mean(final_maps)) if len(final_maps) > 0 else 0.0
+    
+    print("\n" + "="*70)
+    print("✅ FINAL VALIDATION RESULTS")
+    print("="*70)
+    print(f"Final Validation Loss: {final_avg_loss:.4f}")
+    print(f"Final mAP@50 (Validation Set): {final_avg_map:.4f}")
+    print(f"Evaluated on: {min(500, len(val_loader))} episodes")
+    print("="*70)
     print("Training completed!")
 
 
