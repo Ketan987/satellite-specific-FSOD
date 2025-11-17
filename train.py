@@ -9,6 +9,9 @@ import os
 import argparse
 from tqdm import tqdm
 
+# Memory optimization for Kaggle GPU
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:512'
+
 from config import Config
 from utils.coco_utils import COCODataset
 from utils.data_loader import FSODDataset, collate_fn
@@ -174,6 +177,13 @@ def main(args):
         image_size=config.IMAGE_SIZE,
         pretrained=args.pretrained
     ).to(device)
+    
+    # Enable gradient checkpointing to save memory
+    if hasattr(model.backbone.features, 'gradient_checkpointing'):
+        try:
+            model.backbone.features.gradient_checkpointing = True
+        except:
+            pass
     
     # Optimizer
     optimizer = optim.Adam(

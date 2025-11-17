@@ -415,28 +415,3 @@ python inference.py --mode batch \
 
 # 5. Evaluate results (results.csv contains all detections)
 ```
-
-## 📄 Citation
-
-If you use FSOD in your research, please cite:
-
-```bibtex
-@software{fsod2024,
-  title={FSOD: Few-Shot Object Detection},
-  author={Your Name},
-  year={2024},
-  url={https://github.com/yourusername/fsod}
-}
-```
-
-## 📜 License
-
-This project is licensed under the MIT License - see LICENSE file for details.
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## ❓ Support
-
-For issues or questions, please open an GitHub issue or check the troubleshooting section above.

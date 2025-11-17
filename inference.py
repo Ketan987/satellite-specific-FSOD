@@ -13,6 +13,9 @@ import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 
+# Memory optimization for Kaggle GPU
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:512'
+
 from config import Config
 from models.detector import FSODDetector
 from utils.data_loader import prepare_inference_data
