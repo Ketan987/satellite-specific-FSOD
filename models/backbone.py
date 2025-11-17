@@ -99,13 +99,17 @@ class ROIPooling(nn.Module):
                     
                     # Ensure box has non-zero dimensions
                     if w <= 0 or h <= 0:
-                        continue
-                    
-                    # Convert to feature map coordinates with proper rounding
-                    x1_f = x * scale_w
-                    y1_f = y * scale_h
-                    x2_f = (x + w) * scale_w
-                    y2_f = (y + h) * scale_h
+                        # Use center patch as fallback
+                        x1_f = (image_size * 0.25) * scale_w
+                        y1_f = (image_size * 0.25) * scale_h
+                        x2_f = (image_size * 0.75) * scale_w
+                        y2_f = (image_size * 0.75) * scale_h
+                    else:
+                        # Convert to feature map coordinates with proper rounding
+                        x1_f = x * scale_w
+                        y1_f = y * scale_h
+                        x2_f = (x + w) * scale_w
+                        y2_f = (y + h) * scale_h
                     
                     # Convert tensors to float before rounding
                     x1_f = x1_f.item() if isinstance(x1_f, torch.Tensor) else x1_f
@@ -113,20 +117,31 @@ class ROIPooling(nn.Module):
                     x2_f = x2_f.item() if isinstance(x2_f, torch.Tensor) else x2_f
                     y2_f = y2_f.item() if isinstance(y2_f, torch.Tensor) else y2_f
                     
-                    # Use round to nearest, then clamp
-                    x1 = max(0, int(round(x1_f)))
-                    y1 = max(0, int(round(y1_f)))
-                    x2 = min(W, int(round(x2_f)) + 1)
-                    y2 = min(H, int(round(y2_f)) + 1)
+                    # Use ceil/floor to ensure valid regions
+                    x1 = max(0, int(x1_f))
+                    y1 = max(0, int(y1_f))
+                    x2 = min(W, int(x2_f) + 1)
+                    y2 = min(H, int(y2_f) + 1)
                     
-                    # Ensure we have at least a 1x1 region
-                    if x2 <= x1:
-                        x2 = min(x1 + 1, W)
-                    if y2 <= y1:
-                        y2 = min(y1 + 1, H)
+                    # Ensure we have at least a 2x2 region
+                    if x2 <= x1 + 1:
+                        x2 = min(x1 + 2, W)
+                    if y2 <= y1 + 1:
+                        y2 = min(y1 + 2, H)
+                    
+                    # Final safety check
+                    x1 = max(0, min(x1, W - 2))
+                    y1 = max(0, min(y1, H - 2))
+                    x2 = max(x1 + 1, min(x2, W))
+                    y2 = max(y1 + 1, min(y2, H))
                     
                     # Extract and pool ROI
                     roi = features[b:b+1, :, y1:y2, x1:x2]
+                    
+                    # Skip if region is somehow invalid
+                    if roi.shape[2] < 1 or roi.shape[3] < 1:
+                        continue
+                    
                     roi_pooled = self.adaptive_pool(roi)
                     all_roi_features.append(roi_pooled)
         

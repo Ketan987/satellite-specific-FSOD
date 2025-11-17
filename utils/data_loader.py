@@ -73,15 +73,21 @@ class FSODDataset(Dataset):
             for ann in item['annotations']:
                 if ann['category_id'] == item['category_id']:
                     bbox = ann['bbox']  # [x, y, w, h]
+                    # Skip invalid boxes (width or height < 1 pixel)
+                    if bbox[2] < 1 or bbox[3] < 1:
+                        continue
                     # Scale to new size
                     x = bbox[0] * self.image_size / orig_w
                     y = bbox[1] * self.image_size / orig_h
                     w = bbox[2] * self.image_size / orig_w
                     h = bbox[3] * self.image_size / orig_h
+                    # Ensure minimum size after scaling
+                    w = max(2.0, w)
+                    h = max(2.0, h)
                     boxes.append([x, y, w, h])
             
             if len(boxes) == 0:
-                boxes = [[0, 0, 1, 1]]  # Dummy box if none found
+                boxes = [[self.image_size // 4, self.image_size // 4, self.image_size // 2, self.image_size // 2]]  # Center box
             
             support_boxes.append(torch.tensor(boxes, dtype=torch.float32))
             support_labels.append(cat_to_label[item['category_id']])
@@ -105,16 +111,22 @@ class FSODDataset(Dataset):
             for ann in item['annotations']:
                 if ann['category_id'] in selected_cats:
                     bbox = ann['bbox']
+                    # Skip invalid boxes (width or height < 1 pixel)
+                    if bbox[2] < 1 or bbox[3] < 1:
+                        continue
                     # Scale to new size
                     x = bbox[0] * self.image_size / orig_w
                     y = bbox[1] * self.image_size / orig_h
                     w = bbox[2] * self.image_size / orig_w
                     h = bbox[3] * self.image_size / orig_h
+                    # Ensure minimum size after scaling
+                    w = max(2.0, w)
+                    h = max(2.0, h)
                     boxes.append([x, y, w, h])
                     labels.append(cat_to_label[ann['category_id']])
             
             if len(boxes) == 0:
-                boxes = [[0, 0, 1, 1]]
+                boxes = [[self.image_size // 4, self.image_size // 4, self.image_size // 2, self.image_size // 2]]
                 labels = [0]
             
             query_boxes.append(torch.tensor(boxes, dtype=torch.float32))
