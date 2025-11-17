@@ -120,7 +120,6 @@ def main(args):
         print(f"Override: NUM_EPISODES = {args.num_episodes}")
     
     # Device
-    # Use CLI device if provided; default to CPU to avoid incompatible CUDA on some machines
     cli_device = getattr(args, 'device', None)
     if cli_device:
         device = torch.device(cli_device)
@@ -142,6 +141,12 @@ def main(args):
         config.ALLOWED_FORMATS
     )
     
+    # Auto-detect input channels from first image
+    print("Detecting image format...")
+    first_img_path = train_coco.get_image_path(list(train_coco.imgs.keys())[0])
+    input_channels = train_coco._get_num_channels(first_img_path)
+    print(f"✅ Detected {input_channels}-band images")
+    
     # Create FSOD datasets
     train_dataset = FSODDataset(
         train_coco,
@@ -162,14 +167,13 @@ def main(args):
     )
     
     # Data loaders
-    num_workers = 0  # Force single-process for CPU to avoid multiprocessing issues
+    num_workers = 0
     if getattr(args, 'test_episodes', None) is not None:
-        # use single-process data loading for quick CPU tests
         num_workers = 0
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=1,  # 1 episode at a time
+        batch_size=1,
         shuffle=True,
         collate_fn=collate_fn,
         num_workers=num_workers
@@ -183,13 +187,14 @@ def main(args):
         num_workers=num_workers
     )
     
-    # Create model
-    print("Creating model...")
+    # Create model with correct input channels
+    print(f"Creating model with {input_channels}-band input...")
     model = FSODDetector(
         feature_dim=config.FEATURE_DIM,
         embed_dim=config.EMBEDDING_DIM,
         image_size=config.IMAGE_SIZE,
-        pretrained=args.pretrained
+        pretrained=args.pretrained,
+        input_channels=input_channels
     ).to(device)
     
     # Enable gradient checkpointing to save memory
@@ -241,7 +246,7 @@ def main(args):
                 print(f"Saved best model with val mAP: {val_map:.4f}")
     
     # Save final model
-    os.makedirs(config.CHECKPOINT_DIR, exist_ok=True)  # Ensure directory exists
+    os.makedirs(config.CHECKPOINT_DIR, exist_ok=True)
     final_path = os.path.join(config.CHECKPOINT_DIR, 'final_model.pth')
     torch.save(model.state_dict(), final_path)
     
@@ -255,7 +260,7 @@ def main(args):
     
     with torch.no_grad():
         for i, episode_data in enumerate(tqdm(val_loader, desc="Final Validation", total=min(500, len(val_loader)))):
-            if i >= 500:  # Evaluate on up to 500 validation episodes
+            if i >= 500:
                 break
             
             support_images = episode_data['support_images'].to(device)
@@ -286,6 +291,7 @@ def main(args):
     print(f"Final Validation Loss: {final_avg_loss:.4f}")
     print(f"Final mAP@50 (Validation Set): {final_avg_map:.4f}")
     print(f"Evaluated on: {min(500, len(val_loader))} episodes")
+    print(f"Image Format: {input_channels}-band")
     print("="*70)
     print("Training completed!")
 

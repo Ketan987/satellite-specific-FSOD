@@ -8,18 +8,40 @@ import torchvision.models as models
 
 
 class ResNet50Backbone(nn.Module):
-    """ResNet-50 feature extractor"""
+    """ResNet-50 feature extractor with multi-band support"""
     
-    def __init__(self, pretrained=True, feature_dim=2048):
+    def __init__(self, pretrained=True, feature_dim=2048, input_channels=3):
         super(ResNet50Backbone, self).__init__()
         
         # Load pretrained ResNet-50
         resnet = models.resnet50(pretrained=pretrained)
         
+        # Adapt first conv layer for different channel inputs
+        if input_channels != 3:
+            # Replace first conv layer to accept multi-band input
+            original_conv = resnet.conv1
+            self.input_adapter = nn.Conv2d(
+                input_channels, 64, 
+                kernel_size=7, stride=2, padding=3, bias=False
+            )
+            # Initialize with mean of pretrained weights
+            with torch.no_grad():
+                # Average pretrained weights across input channels
+                pretrained_weights = original_conv.weight  # [64, 3, 7, 7]
+                if input_channels == 4:
+                    # For 4-band: repeat the 3rd channel or average
+                    adapted_weights = torch.cat([
+                        pretrained_weights,
+                        pretrained_weights[:, :1, :, :].mean(dim=1, keepdim=True)  # Average for 4th band
+                    ], dim=1)
+                    self.input_adapter.weight.copy_(adapted_weights)
+            resnet.conv1 = self.input_adapter
+        
         # Remove the final FC layer and avgpool
         self.features = nn.Sequential(*list(resnet.children())[:-2])
         
         self.feature_dim = feature_dim
+        self.input_channels = input_channels
         
         # Freeze early layers for faster training (optional)
         # self._freeze_early_layers()
@@ -33,10 +55,14 @@ class ResNet50Backbone(nn.Module):
     def forward(self, x):
         """
         Args:
-            x: [B, 3, H, W]
+            x: [B, C, H, W] where C can be 3 or 4
         Returns:
             features: [B, 2048, H/32, W/32]
         """
+        # Validate input channels match expected
+        if x.shape[1] != self.input_channels:
+            raise ValueError(f"Expected {self.input_channels} channels, got {x.shape[1]}")
+        
         return self.features(x)
 
 

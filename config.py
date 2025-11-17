@@ -27,9 +27,20 @@ class Config:
     
     # Image parameters
     IMAGE_SIZE = 256  # Reduced from 512 to save GPU memory (Kaggle GPU limitation)
-    IMAGE_MEAN = [0.485, 0.456, 0.406]
-    IMAGE_STD = [0.229, 0.224, 0.225]
-    ALLOWED_FORMATS = ['.jpg', '.jpeg', '.JPG', '.JPEG']
+    # Normalization stats for different channel configurations
+    # These will be auto-selected based on image bands
+    IMAGE_MEAN_3BAND = [0.485, 0.456, 0.406]  # RGB
+    IMAGE_STD_3BAND = [0.229, 0.224, 0.225]
+    IMAGE_MEAN_4BAND = [0.485, 0.456, 0.406, 0.406]  # RGBN (NIR normalized similarly)
+    IMAGE_STD_4BAND = [0.229, 0.224, 0.225, 0.225]
+    
+    # Supported formats (3-band: jpg/png, 4-band: tif)
+    ALLOWED_FORMATS_3BAND = ['.jpg', '.jpeg', '.png', '.JPG', '.JPEG', '.PNG']
+    ALLOWED_FORMATS_4BAND = ['.tif', '.tiff', '.TIF', '.TIFF']
+    ALLOWED_FORMATS = ALLOWED_FORMATS_3BAND + ALLOWED_FORMATS_4BAND
+    
+    # Channel configuration
+    ALLOWED_CHANNELS = [3, 4]  # Support both 3-band RGB and 4-band RGBN
     
     # Detection parameters
     IOU_THRESHOLD = 0.5

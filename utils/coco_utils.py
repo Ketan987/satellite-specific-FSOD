@@ -1,5 +1,5 @@
 """
-COCO dataset utilities for FSOD
+COCO dataset utilities for FSOD with multi-band image support
 """
 
 import json
@@ -7,6 +7,7 @@ import os
 from PIL import Image
 import numpy as np
 from collections import defaultdict
+import rasterio
 
 
 class COCODataset:
@@ -45,28 +46,70 @@ class COCODataset:
         for img_id, img_info in self.images.items():
             file_name = img_info['file_name']
             ext = os.path.splitext(file_name)[1].lower()
-            if ext in [fmt.lower() for fmt in self.allowed_formats]:
+            # Check if extension matches allowed formats (case-insensitive)
+            if any(ext == fmt.lower() for fmt in self.allowed_formats):
                 img_path = os.path.join(self.image_dir, file_name)
                 if os.path.exists(img_path):
                     valid.append(img_id)
         return valid
     
+    def _get_num_channels(self, img_path):
+        """Detect number of channels in image (3 for RGB/JPG/PNG, 4 for TIFF)"""
+        ext = os.path.splitext(img_path)[1].lower()
+        
+        if ext in ['.tif', '.tiff']:
+            # Load 4-band TIF
+            try:
+                with rasterio.open(img_path) as src:
+                    return src.count  # Number of bands
+            except:
+                return 4  # Default assumption
+        else:
+            # RGB images
+            return 3
+    
+    def get_image_path(self, image_id):
+        """Get full path to image"""
+        img_info = self.images[image_id]
+        return os.path.join(self.image_dir, img_info['file_name'])
+    
     def get_image(self, image_id):
-        """Load image by ID"""
+        """Load image by ID with multi-band support"""
         img_info = self.images[image_id]
         img_path = os.path.join(self.image_dir, img_info['file_name'])
         
-        # Validate JPEG
-        if not self._is_valid_jpeg(img_path):
-            raise ValueError(f"Invalid JPEG image: {img_path}")
+        ext = os.path.splitext(img_path)[1].lower()
         
-        image = Image.open(img_path).convert('RGB')
+        if ext in ['.tif', '.tiff']:
+            # Load 4-band TIF
+            with rasterio.open(img_path) as src:
+                data = src.read()  # [bands, height, width]
+                
+                if data.shape[0] == 4:
+                    # RGBN format
+                    img_array = np.transpose(data[:4], (1, 2, 0))  # [height, width, 4]
+                else:
+                    raise ValueError(f"TIF must have 4 bands, got {data.shape[0]}")
+                
+                # Convert to 0-255 range if needed
+                if img_array.max() > 255:
+                    # Assuming 16-bit or higher - normalize to 0-255
+                    img_array = ((img_array - img_array.min()) / (img_array.max() - img_array.min() + 1e-8) * 255).astype(np.uint8)
+                else:
+                    img_array = img_array.astype(np.uint8)
+                
+                # Create PIL Image from RGBA
+                image = Image.fromarray(img_array, mode='RGBA')
+        else:
+            # Load 3-band JPG/PNG
+            image = Image.open(img_path).convert('RGB')
+        
         return image, img_info
     
     def _is_valid_jpeg(self, img_path):
-        """Validate JPEG image"""
+        """Validate image format"""
         ext = os.path.splitext(img_path)[1].lower()
-        return ext in [fmt.lower() for fmt in self.allowed_formats]
+        return any(ext == fmt.lower() for fmt in self.allowed_formats)
     
     def get_annotations(self, image_id):
         """Get annotations for an image"""

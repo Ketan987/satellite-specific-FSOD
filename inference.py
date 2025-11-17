@@ -18,41 +18,45 @@ os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:512'
 
 from config import Config
 from models.detector import FSODDetector
-from utils.data_loader import prepare_inference_data
+from utils.data_loader import prepare_inference_data, _load_image_from_path
 
 
 class FSODInference:
-    """FSOD Inference wrapper with batch and single modes"""
+    """FSOD Inference wrapper with multi-band support"""
     
     def __init__(self, model_path, device='cpu', multi_gpu=True):
         self.config = Config()
         
         # Determine device
         if device == 'cuda' and torch.cuda.is_available():
-            self.device = torch.device('cuda:0')  # Primary GPU
+            self.device = torch.device('cuda:0')
             self.multi_gpu = multi_gpu and torch.cuda.device_count() > 1
         else:
             self.device = torch.device('cpu')
             self.multi_gpu = False
         
-        # Load model
+        # Auto-detect input channels from model or default to 3
+        self.input_channels = 3  # Default, will be overridden by actual data
+        
+        # Load model - will determine input_channels from data
         print(f"Loading model from {model_path}...")
+        
+        # Try to load with 3 channels first, then adapt if needed
         self.model = FSODDetector(
             feature_dim=self.config.FEATURE_DIM,
             embed_dim=self.config.EMBEDDING_DIM,
             image_size=self.config.IMAGE_SIZE,
-            pretrained=False
+            pretrained=False,
+            input_channels=3  # Default
         ).to(self.device)
         
-        # Load weights - handle both checkpoint dicts and raw state dicts
+        # Load weights
         checkpoint = torch.load(model_path, map_location=self.device)
         if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
             self.model.load_state_dict(checkpoint['model_state_dict'])
         else:
             self.model.load_state_dict(checkpoint)
         
-        # Note: Multi-GPU with DataParallel doesn't work well with mixed tensor/list data structures
-        # Used in FSOD (support_boxes is a list). Use single GPU for stability.
         if self.multi_gpu:
             print(f"⚠️  Found {torch.cuda.device_count()} GPUs but DataParallel has issues with mixed data types")
             print(f"   Using single GPU inference for stability (GPU 0)")
@@ -118,6 +122,7 @@ class FSODInference:
                score_threshold=None, nms_threshold=None, max_detections=None):
         """
         Run detection on query image given support images
+        Multi-band aware (automatically handles 3-band or 4-band)
         
         Args:
             support_images: List of dicts with 'image_path' and 'class_name' keys
@@ -128,7 +133,7 @@ class FSODInference:
             max_detections: Maximum detections per image
             
         Returns:
-            List of detections with bbox in [x_min, y_min, x_max, y_max] format and class_name
+            List of detections with bbox in [x_min, y_min, x_max, y_max] format
         """
         # Set defaults
         if score_threshold is None:
@@ -138,53 +143,80 @@ class FSODInference:
         if max_detections is None:
             max_detections = self.config.MAX_DETECTIONS
 
-        # Parse support images - handle both list of paths and list of dicts
+        # Parse support images
         support_img_paths = []
         support_classes = []
         
         for support_item in support_images:
             if isinstance(support_item, dict):
-                # Dict format: {'image_path': '...', 'class_name': '...'}
                 support_img_paths.append(support_item['image_path'])
                 support_classes.append(support_item.get('class_name', 'object'))
             elif isinstance(support_item, str):
-                # Simple path string
                 support_img_paths.append(support_item)
-                support_classes.append('object')  # Default class name
+                support_classes.append('object')
             else:
                 raise ValueError(f"Invalid support image format: {support_item}")
 
         # Validate images
         self.validate_images(support_img_paths + [query_image])
 
-        # Load support images
+        # Load support images with multi-band support
+        from utils.data_loader import _load_image_from_path
+        
         support_imgs = []
-        support_bboxes = []  # Auto-detected full image as bbox
+        num_channels = 3  # Default
         
         for img_path in support_img_paths:
-            img = Image.open(img_path).convert('RGB')
+            img, nc = _load_image_from_path(img_path)
             support_imgs.append(img)
-            # Use full image as bounding box [x, y, w, h]
-            w, h = img.size
-            support_bboxes.append([0, 0, w, h])
+            num_channels = nc  # Use actual channel count
+        
+        # Verify query image has same channels
+        query_img_pil, query_nc = _load_image_from_path(query_image)
+        if query_nc != num_channels:
+            raise ValueError(
+                f"Channel mismatch: support images have {num_channels} channels "
+                f"but query image has {query_nc} channels. "
+                f"All images must have the same number of bands."
+            )
         
         # Prepare data
-        support_tensors, query_tensor = prepare_inference_data(
+        support_tensors, query_tensor, nc = prepare_inference_data(
             support_imgs,
-            query_image,
+            query_img_pil,
             self.config.IMAGE_SIZE
         )
+        
+        # Recreate model with correct input channels if needed
+        if nc != self.input_channels:
+            print(f"Adapting model for {nc}-band images...")
+            self.model = FSODDetector(
+                feature_dim=self.config.FEATURE_DIM,
+                embed_dim=self.config.EMBEDDING_DIM,
+                image_size=self.config.IMAGE_SIZE,
+                pretrained=False,
+                input_channels=nc
+            ).to(self.device)
+            # Reload weights with adapted architecture
+            checkpoint = torch.load(self.config.CHECKPOINT_DIR + 'best_model.pth', map_location=self.device)
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                try:
+                    self.model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+                except:
+                    print("⚠️  Could not load weights with strict=True, loading with strict=False")
+            self.input_channels = nc
         
         support_tensors = support_tensors.to(self.device)
         query_tensor = query_tensor.to(self.device)
 
-        # Prepare support boxes as list of tensors
-        support_boxes_list = [
-            torch.tensor([b], dtype=torch.float32, device=self.device)
-            for b in support_bboxes
-        ]
+        # Prepare support boxes and labels
+        support_boxes_list = []
+        for i in range(len(support_imgs)):
+            w, h = support_imgs[i].size
+            support_boxes_list.append(
+                torch.tensor([[0, 0, w, h]], dtype=torch.float32, device=self.device)
+            )
 
-        # Map class names to integer labels
         class_to_idx = {}
         support_labels_list = []
         for class_name in support_classes:
@@ -208,10 +240,10 @@ class FSODInference:
                 n_way=n_way
             )
 
-        # Create reverse mapping from index to class name
+        # Create reverse mapping
         idx_to_class = {v: k for k, v in class_to_idx.items()}
 
-        # Convert to output format [x_min, y_min, x_max, y_max]
+        # Convert to output format
         detections = []
         for i in range(len(pred_boxes)):
             box = pred_boxes[i]

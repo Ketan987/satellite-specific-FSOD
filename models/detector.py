@@ -10,13 +10,13 @@ from models.similarity import SimilarityMatcher, ProposalGenerator, non_max_supp
 
 
 class FSODDetector(nn.Module):
-    """Few-Shot Object Detector"""
+    """Few-Shot Object Detector with multi-band support"""
     
-    def __init__(self, feature_dim=2048, embed_dim=512, image_size=512, pretrained=True):
+    def __init__(self, feature_dim=2048, embed_dim=512, image_size=512, pretrained=True, input_channels=3):
         super(FSODDetector, self).__init__()
         
-        # Feature extraction
-        self.backbone = ResNet50Backbone(pretrained=pretrained, feature_dim=feature_dim)
+        # Feature extraction with multi-band support
+        self.backbone = ResNet50Backbone(pretrained=pretrained, feature_dim=feature_dim, input_channels=input_channels)
         self.embedding = FeatureEmbedding(in_dim=feature_dim, embed_dim=embed_dim)
         
         # ROI pooling
@@ -45,6 +45,7 @@ class FSODDetector(nn.Module):
         
         self.image_size = image_size
         self.embed_dim = embed_dim
+        self.input_channels = input_channels
     
     def extract_features(self, images):
         """Extract features from images"""
@@ -73,16 +74,24 @@ class FSODDetector(nn.Module):
     
     def forward(self, support_images, support_boxes, support_labels, query_images, n_way=None):
         """
-        Forward pass
+        Forward pass with multi-band support
         
         Args:
-            support_images: [N*K, 3, H, W]
+            support_images: [N*K, C, H, W] where C is 3 or 4
             support_boxes: List of [num_boxes, 4]
-            query_images: [Q, 3, H, W]
+            query_images: [Q, C, H, W]
         
         Returns:
             predictions: Dict with boxes, scores, features
         """
+        # Validate input channels
+        expected_channels = support_images.shape[1]
+        if query_images.shape[1] != expected_channels:
+            raise ValueError(
+                f"Channel mismatch: support images have {expected_channels} channels "
+                f"but query images have {query_images.shape[1]} channels"
+            )
+        
         # Extract features
         support_features = self.extract_features(support_images)
         query_features = self.extract_features(query_images)
@@ -93,14 +102,14 @@ class FSODDetector(nn.Module):
         )
         
         # Expand support_labels to match number of boxes
-        # (one label per support image, but ROI pooling may produce multiple features per image)
         support_box_labels = []
         for img_idx, boxes in enumerate(support_boxes):
-            # boxes is a tensor, boxes.shape[0] is number of boxes
             num_boxes = boxes.shape[0] if isinstance(boxes, torch.Tensor) else len(boxes)
             label_val = support_labels[img_idx].item() if isinstance(support_labels[img_idx], torch.Tensor) else support_labels[img_idx]
             support_box_labels.extend([label_val] * num_boxes)
-        support_box_labels = torch.tensor(support_box_labels, dtype=support_labels.dtype, device=support_labels.device)        # Generate proposals for query images
+        support_box_labels = torch.tensor(support_box_labels, dtype=support_labels.dtype, device=support_labels.device)
+        
+        # Generate proposals for query images
         Q, _, H, W = query_features.shape
         feature_map_size = (query_features.shape[2], query_features.shape[3])
         
@@ -127,33 +136,30 @@ class FSODDetector(nn.Module):
 
             # Compute class-level similarity logits [num_proposals, n_way]
             if n_way is None:
-                # try to infer n_way from support_labels
                 n_way = int(torch.max(support_labels).item()) + 1
 
             class_sim = self.similarity_matcher.compute_class_similarity(
                 query_roi_features, support_roi_features, support_box_labels, n_way
-            )  # [num_proposals, n_way]
+            )
 
             # Refine boxes
             box_deltas = self.box_regressor(query_roi_features)
             refined_boxes = self.apply_box_deltas(proposal_boxes, box_deltas)
 
-            # Objectness score (optional gating)
+            # Objectness score
             objectness = torch.sigmoid(self.objectness(query_roi_features).squeeze(1))
 
             # Convert class_sim to probabilities
             class_probs = torch.softmax(class_sim, dim=1)
 
-            # Final detection score: max class probability * objectness
+            # Final detection score
             max_class_probs, pred_classes = class_probs.max(dim=1)
             final_scores = max_class_probs * objectness
             
-            # Critical Fix #5: Pre-filter proposals by objectness before NMS
-            # Reduces computation by filtering obvious negatives early
+            # Pre-filter proposals by objectness
             objectness_threshold = 0.3
             objectness_keep = objectness >= objectness_threshold
             if objectness_keep.sum() == 0:
-                # No proposals pass threshold, keep top 10%
                 top_k = max(1, len(objectness) // 10)
                 _, top_indices = torch.topk(objectness, min(top_k, len(objectness)))
                 objectness_keep = torch.zeros_like(objectness_keep)
