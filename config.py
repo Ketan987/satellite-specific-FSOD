@@ -16,7 +16,7 @@ class Config:
     
     # Few-shot parameters
     N_WAY = 5  # Number of classes per episode
-    K_SHOT = 3  # Number of support examples per class
+    K_SHOT = 2  # Number of support examples per class
     QUERY_SAMPLES = 10  # Number of query samples per episode
     
     # Training parameters
@@ -26,7 +26,7 @@ class Config:
     WEIGHT_DECAY = 5e-4
     
     # Image parameters
-    IMAGE_SIZE = 384  # Reduced from 512 to save GPU memory (Kaggle GPU limitation)
+    IMAGE_SIZE = 256  # Reduced from 512 to save GPU memory (Kaggle GPU limitation)
     IMAGE_MEAN = [0.485, 0.456, 0.406]
     IMAGE_STD = [0.229, 0.224, 0.225]
     ALLOWED_FORMATS = ['.jpg', '.jpeg', '.JPG', '.JPEG']
