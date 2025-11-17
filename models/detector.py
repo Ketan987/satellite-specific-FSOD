@@ -315,8 +315,12 @@ def compute_detection_loss(predictions, target_boxes, target_labels, iou_thresho
             shifted_labels = matched_labels + 1
             shifted_labels = torch.clamp(shifted_labels, 0, n_way)
             
-            # Create new targets tensor using torch.where to avoid in-place ops
-            targets = torch.where(pos_mask, shifted_labels.long(), targets)
+            # Create a full-size targets tensor with shifted_labels at pos positions
+            # targets is a label tensor (not model output), so we can clone and modify safely
+            targets = targets.clone().detach()
+            targets[pos_mask] = shifted_labels.long()
+        else:
+            targets = targets.detach()
 
         # Classification loss
         if use_focal:
