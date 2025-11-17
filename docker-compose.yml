@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  fsod:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fsod-inference
+    volumes:
+      # Mount data directories
+      - ./data/support_images:/app/data/support_images:ro
+      - ./data/query_images:/app/data/query_images:ro
+      - ./data/test_images:/app/data/test_images:ro
+      - ./output:/app/output
+      - ./checkpoints:/app/checkpoints
+    environment:
+      - DEVICE=cpu
+      - PYTHONUNBUFFERED=1
+    # Keep container running
+    stdin_open: true
+    tty: true
+    # For GPU support, uncomment the following:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+# Usage:
+# Build: docker-compose build
+# Run interactive: docker-compose run --rm fsod bash
+# Run single mode: docker-compose run --rm fsod python3 inference.py --mode single --model_path checkpoints/best_model.pth --support_dir data/support_images --query_image data/query_images/test.jpg
+# Run batch mode: docker-compose run --rm fsod python3 inference.py --mode batch --model_path checkpoints/best_model.pth --support_dir data/support_images --query_dir data/query_images
