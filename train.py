@@ -143,7 +143,7 @@ def main(args):
     
     # Auto-detect input channels from first image
     print("Detecting image format...")
-    first_img_path = train_coco.get_image_path(list(train_coco.imgs.keys())[0])
+    first_img_path = train_coco.get_image_path(list(train_coco.images.keys())[0])
     input_channels = train_coco._get_num_channels(first_img_path)
     print(f"✅ Detected {input_channels}-band images")
     
