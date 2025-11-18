@@ -1,16 +1,20 @@
-# Use PyTorch official image with CPU support
-FROM pytorch/pytorch:2.0-runtime
+# Use official Python image as base
+# PyTorch will be installed via pip from requirements.txt
+FROM python:3.10-slim-bullseye
 
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies required for PyTorch and image processing
 RUN apt-get update && apt-get install -y \
-    python3-pip \
+    build-essential \
     git \
     libsm6 \
     libxext6 \
     libxrender-dev \
+    wget \
+    curl \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements

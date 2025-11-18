@@ -415,3 +415,13 @@ python inference.py --mode batch \
 
 # 5. Evaluate results (results.csv contains all detections)
 ```
+
+
+
+docker build -t fsod-inference .
+
+docker run --rm fsod-inference single --help
+docker-compose up
+
+docker compose run --rm fsod train --num_episodes 10 --device cpu
+
