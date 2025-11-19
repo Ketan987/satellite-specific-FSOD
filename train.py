@@ -53,10 +53,10 @@ def build_support_query_labels(support_boxes, support_labels):
     for label_tensor, boxes in zip(support_labels, support_boxes):
         label_val = int(label_tensor.item()) if isinstance(label_tensor, torch.Tensor) else int(label_tensor)
         num_boxes = boxes.shape[0]
+        target = torch.full((max(1, num_boxes),), label_val, dtype=torch.long, device=boxes.device)
         if num_boxes == 0:
-            labels.append(torch.tensor([label_val], dtype=torch.long, device=boxes.device))
-        else:
-            labels.append(torch.full((num_boxes,), label_val, dtype=torch.long, device=boxes.device))
+            target = target[:1]
+        labels.append(target)
     return labels
 
 
@@ -66,11 +66,11 @@ def maml_train_step(model, optimizer, config, device, support_images, support_bo
     fast_model.to(device)
     fast_model.train()
 
-    inner_optimizer = optim.SGD(fast_model.parameters(), lr=config.MAML_INNER_LR)
     support_query_labels = build_support_query_labels(support_boxes, support_labels)
+    inner_steps = max(1, config.MAML_INNER_STEPS)
 
-    for _ in range(max(1, config.MAML_INNER_STEPS)):
-        inner_optimizer.zero_grad()
+    for _ in range(inner_steps):
+        fast_model.zero_grad()
         inner_predictions = fast_model(
             support_images,
             support_boxes,
@@ -80,8 +80,20 @@ def maml_train_step(model, optimizer, config, device, support_images, support_bo
             n_way=n_way
         )
         inner_loss = compute_detection_loss(inner_predictions, support_boxes, support_query_labels)
-        inner_loss.backward()
-        inner_optimizer.step()
+
+        grads = torch.autograd.grad(
+            inner_loss,
+            tuple(fast_model.parameters()),
+            retain_graph=False,
+            create_graph=False,
+            allow_unused=True
+        )
+
+        with torch.no_grad():
+            for param, grad in zip(fast_model.parameters(), grads):
+                if grad is None:
+                    continue
+                param -= config.MAML_INNER_LR * grad
 
     optimizer.zero_grad()
     fast_model.zero_grad()
@@ -99,8 +111,9 @@ def maml_train_step(model, optimizer, config, device, support_images, support_bo
 
     with torch.no_grad():
         for param, fast_param in zip(model.parameters(), fast_model.parameters()):
-            if fast_param.grad is not None:
-                param.grad = fast_param.grad.detach().clone()
+            grad = fast_param.grad
+            if grad is not None:
+                param.grad = grad.detach().clone()
             else:
                 param.grad = None
 
