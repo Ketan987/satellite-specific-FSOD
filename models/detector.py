@@ -228,15 +228,16 @@ class FSODDetector(nn.Module):
             # Filter all predictions by objectness
             refined_boxes = refined_boxes[objectness_keep]
             final_scores = final_scores[objectness_keep]
-            class_logits = class_sim[objectness_keep]
+            class_logits = class_sim[objectness_keep]  # Filter to match objectness
             pred_classes = pred_classes[objectness_keep]
+            objectness_filtered = objectness[objectness_keep]  # Keep filtered objectness
 
             all_predictions.append({
                 'boxes': refined_boxes,
                 'scores': final_scores,
-                'class_logits': class_sim,
+                'class_logits': class_logits,
                 'pred_classes': pred_classes,
-                'objectness_scores': objectness,
+                'objectness_scores': objectness_filtered,
                 'similarity': similarity
             })
         
@@ -348,7 +349,11 @@ def compute_detection_loss(predictions, target_boxes, target_labels, iou_thresho
     for pred, gt_boxes, gt_labels in zip(predictions, target_boxes, target_labels):
         pred_boxes = pred['boxes']  # [P, 4]
         class_logits = pred.get('class_logits', None)  # [P, n_way]
-        objectness_scores = pred.get('objectness_scores', torch.ones(len(pred_boxes)))  # [P]
+        
+        # Get objectness scores - must match pred_boxes shape
+        objectness_scores = pred.get('objectness_scores', None)
+        if objectness_scores is None:
+            objectness_scores = torch.ones(len(pred_boxes), device=pred_boxes.device)
 
         if device is None:
             device = pred_boxes.device
@@ -359,6 +364,11 @@ def compute_detection_loss(predictions, target_boxes, target_labels, iou_thresho
         num_imgs += 1
         P = pred_boxes.shape[0]
         n_way = class_logits.shape[1]
+        
+        # Ensure objectness_scores matches P
+        if len(objectness_scores) != P:
+            # Shape mismatch - use default ones
+            objectness_scores = torch.ones(P, device=device)
 
         # Compute IoU matrix between predictions and GTs
         if len(gt_boxes) == 0:
