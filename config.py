@@ -28,8 +28,8 @@ class Config:
     # Image parameters
     IMAGE_SIZE = 256  # Reduced from 384 to save GPU memory (OOM fix)
     INPUT_CHANNELS = 4  # Set to 4 for RGB+NIR TIFF pipelines
-    IMAGE_MEAN = [0.485, 0.456, 0.406]
-    IMAGE_STD = [0.229, 0.224, 0.225]
+    IMAGE_MEAN = [0.485, 0.456, 0.406, 0.45]  # Update to per-band stats for your dataset
+    IMAGE_STD = [0.229, 0.224, 0.225, 0.225]
     ALLOWED_FORMATS = ['.jpg', '.jpeg', '.JPG', '.JPEG', '.tif', '.tiff', '.TIF', '.TIFF']
     
     # Detection parameters
