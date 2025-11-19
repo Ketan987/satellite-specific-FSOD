@@ -4,9 +4,15 @@ COCO dataset utilities for FSOD
 
 import json
 import os
-from PIL import Image
-import numpy as np
 from collections import defaultdict
+
+import numpy as np
+from PIL import Image, UnidentifiedImageError
+
+try:
+    import tifffile
+except ImportError:  # pragma: no cover - optional dependency
+    tifffile = None
 
 
 class COCODataset:
@@ -59,11 +65,54 @@ class COCODataset:
         if not self._is_valid_format(img_path):
             raise ValueError(f"Unsupported image format: {img_path}")
 
-        image = Image.open(img_path)
+        try:
+            image = Image.open(img_path)
+        except (UnidentifiedImageError, OSError):
+            image = self._load_tiff_with_fallback(img_path)
+
         desired_mode = self._pil_mode_from_channels(num_channels)
         if desired_mode is not None:
             image = image.convert(desired_mode)
         return image, img_info
+
+    def _load_tiff_with_fallback(self, img_path):
+        """Attempt to decode complex TIFFs with tifffile when Pillow fails."""
+        if tifffile is None:
+            raise UnidentifiedImageError(
+                f"Pillow could not read {img_path} and tifffile is not installed."
+            )
+
+        array = tifffile.imread(img_path)
+        if array.ndim > 3:
+            array = array[0]
+
+        if array.ndim == 2:
+            array = array[:, :, np.newaxis]
+
+        if array.shape[0] in (3, 4) and array.shape[2] not in (3, 4):
+            array = np.transpose(array, (1, 2, 0))
+
+        if array.shape[2] > 4:
+            array = array[:, :, :4]
+
+        array = np.ascontiguousarray(self._ensure_uint8(array))
+        return Image.fromarray(array)
+
+    @staticmethod
+    def _ensure_uint8(array):
+        """Scale array to uint8 for PIL compatibility."""
+        if array.dtype == np.uint8:
+            return array
+
+        arr = array.astype(np.float32)
+        if np.issubdtype(array.dtype, np.integer):
+            info = np.iinfo(array.dtype)
+            arr = arr / max(info.max, 1)
+        else:
+            arr = np.clip(arr, 0.0, 1.0)
+
+        arr = np.clip(arr * 255.0, 0, 255)
+        return arr.astype(np.uint8)
     
     def _is_valid_format(self, img_path):
         ext = os.path.splitext(img_path)[1].lower()

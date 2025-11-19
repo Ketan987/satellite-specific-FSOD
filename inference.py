@@ -73,12 +73,24 @@ class FSODInference:
                 Image.open(path)
             except Exception as e:
                 raise ValueError(f"Cannot open image {path}: {e}")
+
+    @staticmethod
+    def _rgb_preview(image: Image.Image) -> Image.Image:
+        """Create an RGB view using only the first three bands for visualization."""
+        try:
+            bands = image.split()
+            if len(bands) >= 3:
+                return Image.merge('RGB', bands[:3])
+        except Exception:
+            pass
+        return image.convert('RGB')
     
     def visualize_detections(self, image_path, detections, output_path):
         """
         Draw bounding boxes with similarity scores on image
         """
-        img = Image.open(image_path).convert('RGB')
+        with Image.open(image_path) as raw_img:
+            img = self._rgb_preview(raw_img)
         draw = ImageDraw.Draw(img)
         img_width, img_height = img.size
         
