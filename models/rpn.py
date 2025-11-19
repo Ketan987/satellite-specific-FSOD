@@ -25,11 +25,11 @@ def xyxy_to_xywh(boxes: torch.Tensor) -> torch.Tensor:
 
 
 def clamp_boxes_xyxy(boxes: torch.Tensor, image_size: int) -> torch.Tensor:
-    boxes[:, 0] = boxes[:, 0].clamp(0.0, float(image_size - 1))
-    boxes[:, 1] = boxes[:, 1].clamp(0.0, float(image_size - 1))
-    boxes[:, 2] = boxes[:, 2].clamp(0.0, float(image_size))
-    boxes[:, 3] = boxes[:, 3].clamp(0.0, float(image_size))
-    return boxes
+    x1 = boxes[:, 0].clamp(0.0, float(image_size - 1))
+    y1 = boxes[:, 1].clamp(0.0, float(image_size - 1))
+    x2 = boxes[:, 2].clamp(0.0, float(image_size))
+    y2 = boxes[:, 3].clamp(0.0, float(image_size))
+    return torch.stack([x1, y1, x2, y2], dim=1)
 
 
 def compute_iou_xyxy(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
