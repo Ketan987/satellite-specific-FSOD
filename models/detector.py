@@ -418,8 +418,7 @@ def compute_detection_loss(predictions, target_boxes, target_labels, iou_thresho
                 neg_full_indices = torch.where(neg_mask)[0]
                 hard_neg_full_indices = neg_full_indices[top_hard_indices]
                 # Create mask using torch.scatter (efficient, no in-place)
-                hard_neg_mask = torch.zeros(P, dtype=torch.bool, device=device)
-                hard_neg_mask.scatter_(0, hard_neg_full_indices, True)
+                hard_neg_mask = torch.zeros(P, dtype=torch.bool, device=device).scatter(0, hard_neg_full_indices, True)
             else:
                 # Keep all negatives if fewer than target
                 hard_neg_mask = neg_mask.clone()
@@ -431,8 +430,7 @@ def compute_detection_loss(predictions, target_boxes, target_labels, iou_thresho
             neg_indices = torch.where(neg_mask)[0]
             hard_neg_full_indices = neg_indices[top_indices]
             # Create mask using torch.scatter (efficient, no in-place)
-            hard_neg_mask = torch.zeros(P, dtype=torch.bool, device=device)
-            hard_neg_mask.scatter_(0, hard_neg_full_indices, True)
+            hard_neg_mask = torch.zeros(P, dtype=torch.bool, device=device).scatter(0, hard_neg_full_indices, True)
         else:
             hard_neg_mask = torch.zeros(P, dtype=torch.bool, device=device)
         
