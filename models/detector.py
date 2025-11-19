@@ -153,53 +153,39 @@ class FSODDetector(nn.Module):
             # ===== CRITICAL FIX #4: Immediate Box Validation =====
             # Validate boxes right after refinement (don't wait for ROI pooling)
             # This prevents clustering from invalid box coordinates
-            # FIX: Create new tensor instead of in-place modifications
+            # FIX: Use torch.stack to create new tensor without in-place ops
             MIN_BOX_SIZE = 2.0
             
-            # Create new box tensor (no in-place operations)
-            validated_boxes = refined_boxes.clone()
+            # Clamp each dimension safely using torch operations (no indexing assignment)
+            x_clamped = torch.clamp(refined_boxes[:, 0], 0.0, float(self.image_size) - MIN_BOX_SIZE)
+            y_clamped = torch.clamp(refined_boxes[:, 1], 0.0, float(self.image_size) - MIN_BOX_SIZE)
+            w_clamped = torch.clamp(refined_boxes[:, 2], MIN_BOX_SIZE, float(self.image_size))
+            h_clamped = torch.clamp(refined_boxes[:, 3], MIN_BOX_SIZE, float(self.image_size))
             
-            # Clamp center coordinates to valid range
-            validated_boxes[:, 0] = torch.clamp(validated_boxes[:, 0], 0.0, 
-                                               float(self.image_size) - MIN_BOX_SIZE)
-            validated_boxes[:, 1] = torch.clamp(validated_boxes[:, 1], 0.0, 
-                                               float(self.image_size) - MIN_BOX_SIZE)
+            # Check for out of bounds
+            max_x = x_clamped + w_clamped
+            max_y = y_clamped + h_clamped
             
-            # Clamp dimensions to positive values
-            validated_boxes[:, 2] = torch.clamp(validated_boxes[:, 2], MIN_BOX_SIZE, 
-                                               float(self.image_size))
-            validated_boxes[:, 3] = torch.clamp(validated_boxes[:, 3], MIN_BOX_SIZE, 
-                                               float(self.image_size))
-            
-            # Additional safety: ensure bottom-right corner stays in bounds
-            max_x = validated_boxes[:, 0] + validated_boxes[:, 2]
-            max_y = validated_boxes[:, 1] + validated_boxes[:, 3]
-            
-            # If extends beyond image, shrink box (create new tensor, not in-place)
+            # If extends beyond image, shrink box (pure tensor operations)
             out_of_bounds_x = max_x > self.image_size
             out_of_bounds_y = max_y > self.image_size
             
-            if out_of_bounds_x.sum() > 0:
-                w_adjusted = validated_boxes[:, 2].clone()
-                w_adjusted[out_of_bounds_x] = w_adjusted[out_of_bounds_x] - (max_x[out_of_bounds_x] - self.image_size)
-                validated_boxes[:, 2] = w_adjusted
+            # Use torch.where for conditional assignment (no in-place)
+            w_adjusted = torch.where(out_of_bounds_x, 
+                                    w_clamped - (max_x - self.image_size),
+                                    w_clamped)
+            h_adjusted = torch.where(out_of_bounds_y,
+                                    h_clamped - (max_y - self.image_size),
+                                    h_clamped)
             
-            if out_of_bounds_y.sum() > 0:
-                h_adjusted = validated_boxes[:, 3].clone()
-                h_adjusted[out_of_bounds_y] = h_adjusted[out_of_bounds_y] - (max_y[out_of_bounds_y] - self.image_size)
-                validated_boxes[:, 3] = h_adjusted
+            # Final clamps with torch.where
+            x_final = torch.clamp(x_clamped, 0.0, float(self.image_size) - MIN_BOX_SIZE)
+            y_final = torch.clamp(y_clamped, 0.0, float(self.image_size) - MIN_BOX_SIZE)
+            w_final = torch.clamp(w_adjusted, MIN_BOX_SIZE, float(self.image_size))
+            h_final = torch.clamp(h_adjusted, MIN_BOX_SIZE, float(self.image_size))
             
-            # Final safety clamp
-            validated_boxes[:, 0] = torch.clamp(validated_boxes[:, 0], 0.0, 
-                                               float(self.image_size) - MIN_BOX_SIZE)
-            validated_boxes[:, 1] = torch.clamp(validated_boxes[:, 1], 0.0, 
-                                               float(self.image_size) - MIN_BOX_SIZE)
-            validated_boxes[:, 2] = torch.clamp(validated_boxes[:, 2], MIN_BOX_SIZE, 
-                                               float(self.image_size))
-            validated_boxes[:, 3] = torch.clamp(validated_boxes[:, 3], MIN_BOX_SIZE, 
-                                               float(self.image_size))
-            
-            refined_boxes = validated_boxes
+            # Stack into refined_boxes (creates new tensor)
+            refined_boxes = torch.stack([x_final, y_final, w_final, h_final], dim=1)
 
             # ===== CRITICAL FIX #3: Joint Objectness/Classification =====
             # Objectness is CONDITIONED on predicted class (not independent)
@@ -233,8 +219,8 @@ class FSODDetector(nn.Module):
                 # No proposals pass threshold, keep top 5% (stricter)
                 top_k = max(1, len(objectness) // 20)
                 _, top_indices = torch.topk(objectness, min(top_k, len(objectness)))
-                objectness_keep = torch.zeros_like(objectness_keep)
-                objectness_keep[top_indices] = True
+                # Create mask using scatter (no in-place indexing)
+                objectness_keep = torch.zeros_like(objectness_keep).scatter(0, top_indices, True)
             
             # Filter all predictions by objectness
             refined_boxes = refined_boxes[objectness_keep]
@@ -540,20 +526,25 @@ def compute_iou_matrix(boxes1, boxes2):
     """Compute IoU matrix between two sets of boxes with safety checks"""
     N, M = len(boxes1), len(boxes2)
     device = boxes1.device if isinstance(boxes1, torch.Tensor) else 'cpu'
-    ious = torch.zeros(N, M, device=device, dtype=torch.float32)
     
     if N == 0 or M == 0:
-        return ious
+        return torch.zeros(N, M, device=device, dtype=torch.float32)
     
+    # Compute all IoUs without in-place operations
+    ious_list = []
     for i in range(N):
+        row_ious = []
         for j in range(M):
             try:
                 iou = compute_box_iou(boxes1[i], boxes2[j])
-                ious[i, j] = max(0.0, min(1.0, float(iou)))  # Clamp to [0, 1]
+                row_ious.append(max(0.0, min(1.0, float(iou))))  # Clamp to [0, 1]
             except Exception as e:
                 # On error, assign 0 IoU
-                ious[i, j] = 0.0
+                row_ious.append(0.0)
+        ious_list.append(row_ious)
     
+    # Convert list to tensor (no in-place operations)
+    ious = torch.tensor(ious_list, device=device, dtype=torch.float32)
     return ious
 
 
