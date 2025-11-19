@@ -40,8 +40,15 @@ class FSODDetector(nn.Module):
         # Box refinement
         self.box_regressor = nn.Linear(512, 4)
         
-        # Objectness score
-        self.objectness = nn.Linear(512, 1)
+        # Objectness: predicts "is this an object?" conditioned on class
+        # Concatenate class logits with features for objectness prediction
+        # This makes objectness depend on predicted class (joint learning)
+        self.objectness = nn.Sequential(
+            nn.Linear(512 + 512, 256),  # 512 features + 512 from class context
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(256, 1)
+        )
         
         self.image_size = image_size
         self.embed_dim = embed_dim
@@ -87,10 +94,16 @@ class FSODDetector(nn.Module):
         support_features = self.extract_features(support_images)
         query_features = self.extract_features(query_images)
         
-        # Extract ROI features from support set
-        support_roi_features = self.extract_roi_features(
-            support_features, support_boxes
-        )
+        # ===== CRITICAL FIX #6: Freeze Support Features =====
+        # Support features should not change during training (they're the reference)
+        # This prevents gradient explosion and keeps support representations stable
+        with torch.no_grad():
+            support_roi_features = self.extract_roi_features(
+                support_features, support_boxes
+            ).detach()
+        
+        # Query features are NOT frozen - they should adapt during training
+        query_roi_features_all = []  # Will be filled per query image
         
         # Expand support_labels to match number of boxes
         # (one label per support image, but ROI pooling may produce multiple features per image)
@@ -138,23 +151,75 @@ class FSODDetector(nn.Module):
             box_deltas = self.box_regressor(query_roi_features)
             refined_boxes = self.apply_box_deltas(proposal_boxes, box_deltas)
 
-            # Objectness score (optional gating)
-            objectness = torch.sigmoid(self.objectness(query_roi_features).squeeze(1))
+            # ===== CRITICAL FIX #4: Immediate Box Validation =====
+            # Validate boxes right after refinement (don't wait for ROI pooling)
+            # This prevents clustering from invalid box coordinates
+            MIN_BOX_SIZE = 2.0
+            
+            # Clamp center coordinates to valid range
+            refined_boxes[:, 0] = torch.clamp(refined_boxes[:, 0], 0.0, 
+                                             float(self.image_size) - MIN_BOX_SIZE)
+            refined_boxes[:, 1] = torch.clamp(refined_boxes[:, 1], 0.0, 
+                                             float(self.image_size) - MIN_BOX_SIZE)
+            
+            # Clamp dimensions to positive values
+            refined_boxes[:, 2] = torch.clamp(refined_boxes[:, 2], MIN_BOX_SIZE, 
+                                             float(self.image_size))
+            refined_boxes[:, 3] = torch.clamp(refined_boxes[:, 3], MIN_BOX_SIZE, 
+                                             float(self.image_size))
+            
+            # Additional safety: ensure bottom-right corner stays in bounds
+            max_x = refined_boxes[:, 0] + refined_boxes[:, 2]
+            max_y = refined_boxes[:, 1] + refined_boxes[:, 3]
+            
+            # If extends beyond image, shrink box
+            out_of_bounds_x = max_x > self.image_size
+            out_of_bounds_y = max_y > self.image_size
+            
+            if out_of_bounds_x.sum() > 0:
+                refined_boxes[out_of_bounds_x, 2] -= (max_x[out_of_bounds_x] - self.image_size)
+            if out_of_bounds_y.sum() > 0:
+                refined_boxes[out_of_bounds_y, 3] -= (max_y[out_of_bounds_y] - self.image_size)
+            
+            # Final safety clamp
+            refined_boxes[:, 0] = torch.clamp(refined_boxes[:, 0], 0.0, 
+                                             float(self.image_size) - MIN_BOX_SIZE)
+            refined_boxes[:, 1] = torch.clamp(refined_boxes[:, 1], 0.0, 
+                                             float(self.image_size) - MIN_BOX_SIZE)
+            refined_boxes[:, 2] = torch.clamp(refined_boxes[:, 2], MIN_BOX_SIZE, 
+                                             float(self.image_size))
+            refined_boxes[:, 3] = torch.clamp(refined_boxes[:, 3], MIN_BOX_SIZE, 
+                                             float(self.image_size))
 
+            # ===== CRITICAL FIX #3: Joint Objectness/Classification =====
+            # Objectness is CONDITIONED on predicted class (not independent)
+            # This prevents high objectness scores for wrong classes
+            
+            # Detach class logits to prevent circular gradients during objectness prediction
+            class_logits_for_objectness = class_sim.detach()  # [num_proposals, n_way]
+            
+            # Create augmented feature vector: original features + class context
+            # This makes objectness depend on what class the proposal predicts
+            augmented_features = torch.cat([
+                query_roi_features,  # [P, 512] - visual features
+                class_logits_for_objectness  # [P, n_way] 
+            ], dim=1)  # [P, 512 + n_way]
+            
+            # Predict objectness conditioned on both visual features AND class prediction
+            objectness_raw = self.objectness(augmented_features).squeeze(1)  # [P]
+            objectness = torch.sigmoid(objectness_raw)  # [P], range [0, 1]
+            
             # Convert class_sim to probabilities
             class_probs = torch.softmax(class_sim, dim=1)
-
-            # Final detection score: max class probability * objectness
-            max_class_probs, pred_classes = class_probs.max(dim=1)
             final_scores = max_class_probs * objectness
             
             # Critical Fix #5: Pre-filter proposals by objectness before NMS
             # Reduces computation by filtering obvious negatives early
-            objectness_threshold = 0.3
+            objectness_threshold = 0.5  # Increased from 0.3 to filter more aggressively
             objectness_keep = objectness >= objectness_threshold
             if objectness_keep.sum() == 0:
-                # No proposals pass threshold, keep top 10%
-                top_k = max(1, len(objectness) // 10)
+                # No proposals pass threshold, keep top 5% (stricter)
+                top_k = max(1, len(objectness) // 20)
                 _, top_indices = torch.topk(objectness, min(top_k, len(objectness)))
                 objectness_keep = torch.zeros_like(objectness_keep)
                 objectness_keep[top_indices] = True
@@ -168,8 +233,9 @@ class FSODDetector(nn.Module):
             all_predictions.append({
                 'boxes': refined_boxes,
                 'scores': final_scores,
-                'class_logits': class_logits,
+                'class_logits': class_sim,
                 'pred_classes': pred_classes,
+                'objectness_scores': objectness,
                 'similarity': similarity
             })
         
@@ -254,13 +320,20 @@ class FSODDetector(nn.Module):
 
 def compute_detection_loss(predictions, target_boxes, target_labels, iou_threshold=0.3, box_loss_weight=1.0, use_focal=True):
     """
-    Compute detection loss with focal loss for class imbalance and smooth L1 for boxes.
+    Compute detection loss with hard negative mining.
+    
+    CRITICAL FIX: Hard negative mining focuses training on discriminative regions.
+    Positives: IoU > threshold
+    Hard Negatives: High objectness but low IoU (proposals near objects)
+    Easy Negatives: Ignored (waste of training signal)
+    
+    Ratio: 3 negatives per positive (standard in object detection)
 
     Args:
         predictions: List of prediction dicts (per query image)
         target_boxes: List of [num_boxes, 4] (per query image)
         target_labels: List of [num_boxes] (per query image) -- labels in [0..n_way-1]
-        iou_threshold: IoU threshold for positive/negative (lowered for small objects)
+        iou_threshold: IoU threshold for positive/negative
         box_loss_weight: Weight for box regression loss
         use_focal: Use focal loss for class imbalance
 
@@ -274,6 +347,7 @@ def compute_detection_loss(predictions, target_boxes, target_labels, iou_thresho
     for pred, gt_boxes, gt_labels in zip(predictions, target_boxes, target_labels):
         pred_boxes = pred['boxes']  # [P, 4]
         class_logits = pred.get('class_logits', None)  # [P, n_way]
+        objectness_scores = pred.get('objectness_scores', torch.ones(len(pred_boxes)))  # [P]
 
         if device is None:
             device = pred_boxes.device
@@ -287,7 +361,7 @@ def compute_detection_loss(predictions, target_boxes, target_labels, iou_thresho
 
         # Compute IoU matrix between predictions and GTs
         if len(gt_boxes) == 0:
-            # No GT -> all proposals treated as hard negatives (class 0 = background)
+            # No GT -> all proposals treated as hard negatives
             targets = torch.zeros(P, dtype=torch.long, device=device)
             if use_focal:
                 cls_loss = focal_loss_ce(class_logits, targets, alpha=0.25, gamma=2.0)
@@ -299,12 +373,58 @@ def compute_detection_loss(predictions, target_boxes, target_labels, iou_thresho
         ious = compute_iou_matrix(pred_boxes, gt_boxes)  # [P, G]
         max_ious, gt_indices = ious.max(dim=1)  # [P]
 
-        # Assign targets: class 0 = background, 1..n_way = actual classes
-        targets = torch.zeros(P, dtype=torch.long, device=device)
-        pos_mask = max_ious > iou_threshold
+        # ===== HARD NEGATIVE MINING =====
+        pos_mask = max_ious > iou_threshold  # [P] - positive proposals
+        neg_mask = ~pos_mask  # [P] - negative proposals
         
-        if pos_mask.sum() > 0:
-            matched_gt_idxs = gt_indices[pos_mask]
+        # Select hard negatives: high objectness but low IoU
+        num_pos = pos_mask.sum().item()
+        num_neg = neg_mask.sum().item()
+        
+        hard_neg_mask = torch.zeros(P, dtype=torch.bool, device=device)
+        
+        if num_pos > 0 and num_neg > 0:
+            # Target: 3 negatives per positive (standard ratio)
+            target_num_hard_neg = min(num_neg, max(1, num_pos * 3))
+            
+            # Get objectness scores of negative proposals
+            neg_objectness = objectness_scores[neg_mask].detach()
+            
+            # Select top hard negatives by objectness
+            if target_num_hard_neg < num_neg:
+                _, top_hard_indices = torch.topk(neg_objectness, target_num_hard_neg)
+                # Map back to full indices
+                neg_indices = torch.where(neg_mask)[0]
+                hard_neg_indices = neg_indices[top_hard_indices]
+                hard_neg_mask[hard_neg_indices] = True
+            else:
+                # Keep all negatives if fewer than target
+                hard_neg_mask[neg_mask] = True
+        elif num_pos == 0 and num_neg > 0:
+            # No positives: keep top 5% of negatives
+            neg_objectness = objectness_scores[neg_mask].detach()
+            top_k = max(1, num_neg // 20)  # 5% of negatives
+            _, top_indices = torch.topk(neg_objectness, min(top_k, num_neg))
+            neg_indices = torch.where(neg_mask)[0]
+            hard_neg_mask[neg_indices[top_indices]] = True
+        
+        # Selected proposals: positives + hard negatives only
+        selected_mask = pos_mask | hard_neg_mask
+        
+        if selected_mask.sum() == 0:
+            # Safety: if no proposals selected, use positives
+            selected_mask = pos_mask
+        
+        if selected_mask.sum() == 0:
+            # Still no proposals, skip this image
+            continue
+
+        # ===== ASSIGN TARGETS =====
+        targets = torch.zeros(P, dtype=torch.long, device=device)
+        pos_indices = torch.where(pos_mask)[0]
+        
+        if len(pos_indices) > 0:
+            matched_gt_idxs = gt_indices[pos_indices]
             matched_labels = gt_labels[matched_gt_idxs]
             
             # Ensure matched_labels are valid (should be 0..n_way-1)
@@ -315,31 +435,39 @@ def compute_detection_loss(predictions, target_boxes, target_labels, iou_thresho
             shifted_labels = matched_labels + 1
             shifted_labels = torch.clamp(shifted_labels, 0, n_way)
             
-            # Create a full-size targets tensor with shifted_labels at pos positions
-            # targets is a label tensor (not model output), so we can clone and modify safely
-            targets = targets.clone().detach()
-            targets[pos_mask] = shifted_labels.long()
-        else:
-            targets = targets.detach()
+            # Set targets for positive proposals
+            targets[pos_indices] = shifted_labels.long()
 
+        # ===== COMPUTE LOSS ONLY ON SELECTED PROPOSALS =====
+        selected_logits = class_logits[selected_mask]
+        selected_targets = targets[selected_mask]
+        
         # Classification loss
         if use_focal:
-            cls_loss = focal_loss_ce(class_logits, targets, alpha=0.25, gamma=2.0)
+            cls_loss = focal_loss_ce(selected_logits, selected_targets, alpha=0.25, gamma=2.0)
         else:
-            cls_loss = F.cross_entropy(class_logits, targets)
+            cls_loss = F.cross_entropy(selected_logits, selected_targets)
 
         # Box regression loss for positive proposals only
-        if pos_mask.sum() > 0:
-            pred_pos = pred_boxes[pos_mask]
-            gt_pos = gt_boxes[gt_indices[pos_mask]]
+        box_loss = torch.tensor(0.0, device=device)
+        selected_pos_mask = pos_mask[selected_mask]
+        
+        if selected_pos_mask.sum() > 0:
+            # Get positive proposals from selected proposals
+            selected_pred_boxes = pred_boxes[selected_mask]
+            pred_pos = selected_pred_boxes[selected_pos_mask]
+            
+            # Map back to gt indices
+            selected_pos_indices = torch.where(selected_mask)[0][torch.where(selected_pos_mask)[0]]
+            gt_idx_for_pos = gt_indices[selected_pos_indices]
+            gt_pos = gt_boxes[gt_idx_for_pos]
+            
             box_loss = F.smooth_l1_loss(pred_pos, gt_pos, reduction='mean')
-        else:
-            box_loss = torch.tensor(0.0, device=device)
 
         total_loss += cls_loss + box_loss * box_loss_weight
 
     if num_imgs == 0:
-        return torch.tensor(0.0, device=device)
+        return torch.tensor(0.0, device=device if device is not None else 'cpu')
 
     return total_loss / num_imgs
 
@@ -347,7 +475,9 @@ def compute_detection_loss(predictions, target_boxes, target_labels, iou_thresho
 def focal_loss_ce(class_logits, targets, alpha=0.25, gamma=2.0):
     """
     Focal Loss: FL(p_t) = -alpha * (1 - p_t)^gamma * log(p_t)
+    
     Addresses class imbalance and hard example mining.
+    Properly validates targets instead of silently corrupting them.
     
     Args:
         class_logits: [N, C] logits
@@ -355,23 +485,26 @@ def focal_loss_ce(class_logits, targets, alpha=0.25, gamma=2.0):
         alpha: weighting for background (0.25)
         gamma: focusing parameter (2.0)
     """
-    # Validate targets are in valid range
     num_classes = class_logits.shape[1]
-    if targets.max() >= num_classes or targets.min() < 0:
-        # Clamp invalid targets to valid range
-        targets = torch.clamp(targets, 0, num_classes - 1)
     
-    log_probs = F.log_softmax(class_logits, dim=-1)
-    # Use clamp to ensure valid indices
-    valid_targets = torch.clamp(targets, 0, num_classes - 1).unsqueeze(1)
-    log_p_t = log_probs.gather(1, valid_targets).squeeze(1)  # [N]
+    # VALIDATE targets - don't silently corrupt data
+    if targets.max() >= num_classes:
+        raise ValueError(f"Invalid target label {int(targets.max())} >= num_classes {num_classes}")
+    if targets.min() < 0:
+        raise ValueError(f"Invalid target label {int(targets.min())} < 0")
+    
+    # Compute log softmax
+    log_probs = F.log_softmax(class_logits, dim=-1)  # [N, C]
+    
+    # Gather log probabilities for target classes
+    log_p_t = log_probs.gather(1, targets.unsqueeze(1)).squeeze(1)  # [N]
     p_t = torch.exp(log_p_t)  # [N]
     
-    # Focal weight: focus on hard examples
+    # Focal weight: (1 - p_t)^gamma focuses on hard examples
     focal_weight = (1.0 - p_t) ** gamma  # [N]
     
     # Focal loss
-    loss = -alpha * focal_weight * log_p_t  # [N]
+    loss = -focal_weight * log_p_t  # [N]
     
     return loss.mean()
 

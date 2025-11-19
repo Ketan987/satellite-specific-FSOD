@@ -16,25 +16,25 @@ class Config:
     
     # Few-shot parameters
     N_WAY = 5  # Number of classes per episode
-    K_SHOT = 2  # Number of support examples per class
-    QUERY_SAMPLES = 10  # Number of query samples per episode
+    K_SHOT = 5  # Number of support examples per class (increased from 2 for better prototypes)
+    QUERY_SAMPLES = 20  # Number of query samples per episode (increased from 10 for better statistics)
     
     # Training parameters
     BATCH_SIZE = 1
     NUM_EPISODES = 10000
-    LEARNING_RATE = 1e-4
+    LEARNING_RATE = 5e-4  # Increased from 1e-4 for better convergence
     WEIGHT_DECAY = 5e-4
     
     # Image parameters
-    IMAGE_SIZE = 256  # Reduced from 512 to save GPU memory (Kaggle GPU limitation)
+    IMAGE_SIZE = 384  # Increased from 256 for better satellite image detail
     IMAGE_MEAN = [0.485, 0.456, 0.406]
     IMAGE_STD = [0.229, 0.224, 0.225]
     ALLOWED_FORMATS = ['.jpg', '.jpeg', '.JPG', '.JPEG']
     
     # Detection parameters
     IOU_THRESHOLD = 0.5
-    SCORE_THRESHOLD = 0.3
-    NMS_THRESHOLD = 0.4
+    SCORE_THRESHOLD = 0.5  # Increased from 0.3 to filter noisy predictions
+    NMS_THRESHOLD = 0.3  # Stricter NMS to remove overlapping boxes
     MAX_DETECTIONS = 100
     
     # Anchor boxes (scaled to IMAGE_SIZE)

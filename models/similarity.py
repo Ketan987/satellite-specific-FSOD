@@ -43,7 +43,10 @@ class SimilarityMatcher(nn.Module):
     def compute_class_similarity(self, query_features, support_features, 
                                 support_labels, n_way):
         """
-        Compute similarity to each class (average over support examples)
+        Compute similarity to class prototypes (Prototypical Networks).
+        
+        Prototype = mean of support features for each class.
+        This is TRUE few-shot learning: compares to class prototype, not individual examples.
         
         Args:
             query_features: [M, C]
@@ -57,19 +60,32 @@ class SimilarityMatcher(nn.Module):
         M = query_features.shape[0]
         class_similarities = []
         
-        # Compute similarity for each class
+        # Normalize query features once
+        query_norm = F.normalize(query_features, p=2, dim=1)  # [M, C]
+        
+        # Compute similarity to each class prototype
         for class_id in range(n_way):
             # Get support features for this class
             mask = support_labels == class_id
-            class_support = support_features[mask]
+            class_support = support_features[mask]  # [K, C]
             
             if class_support.shape[0] == 0:
-                # No support examples for this class
+                # No support examples for this class - assign zero similarity
                 class_sim = torch.zeros(M, device=query_features.device)
             else:
-                # Compute similarity and average
-                sim = self.forward(class_support, query_features)  # [M, K]
-                class_sim = sim.mean(dim=1)  # [M]
+                # Create class prototype: mean of support features
+                # This is the KEY DIFFERENCE: prototype is the centroid
+                prototype = class_support.mean(dim=0, keepdim=True)  # [1, C]
+                
+                # Normalize prototype
+                proto_norm = F.normalize(prototype, p=2, dim=1)  # [1, C]
+                
+                # Compute cosine similarity: query @ prototype.T
+                # Result: [M, 1] -> squeeze to [M]
+                class_sim = torch.mm(query_norm, proto_norm.t()).squeeze(1)
+                
+                # Scale by temperature for sharper/softer predictions
+                class_sim = class_sim * self.temperature
             
             class_similarities.append(class_sim)
         

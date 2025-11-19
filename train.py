@@ -9,6 +9,7 @@ import os
 import argparse
 from tqdm import tqdm
 import numpy as np
+import gc
 
 # Memory optimization for Kaggle GPU
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:512'
@@ -17,6 +18,23 @@ from config import Config
 from utils.coco_utils import COCODataset
 from utils.data_loader import FSODDataset, collate_fn
 from models.detector import FSODDetector, compute_detection_loss
+
+
+def clear_memory():
+    """Clear GPU and CPU memory caches"""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+    gc.collect()
+
+
+def get_memory_stats():
+    """Get current memory usage stats"""
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / 1e9
+        reserved = torch.cuda.memory_reserved() / 1e9
+        return {"allocated_gb": allocated, "reserved_gb": reserved}
+    return {"allocated_gb": 0, "reserved_gb": 0}
 
 
 def setup_multi_gpu(model, device):
@@ -29,30 +47,51 @@ def setup_multi_gpu(model, device):
     return model
 
 
-def train_episode(model, episode_data, optimizer, device):
-    """Train on a single episode"""
+def train_episode(model, episode_data, optimizer, device, retry_on_oom=True):
+    """Train on a single episode with OOM handling"""
     model.train()
     
-    # Move data to device
-    support_images = episode_data['support_images'].to(device)
-    support_boxes = [boxes.to(device) for boxes in episode_data['support_boxes']]
-    support_labels = episode_data['support_labels'].to(device)
-    query_images = episode_data['query_images'].to(device)
-    query_boxes = [boxes.to(device) for boxes in episode_data['query_boxes']]
-    query_labels = [labels.to(device) for labels in episode_data['query_labels']]
-    
-    # Forward pass
-    optimizer.zero_grad()
-    predictions = model(support_images, support_boxes, support_labels, query_images, n_way=episode_data.get('n_way', None))
+    try:
+        # Move data to device
+        support_images = episode_data['support_images'].to(device)
+        support_boxes = [boxes.to(device) for boxes in episode_data['support_boxes']]
+        support_labels = episode_data['support_labels'].to(device)
+        query_images = episode_data['query_images'].to(device)
+        query_boxes = [boxes.to(device) for boxes in episode_data['query_boxes']]
+        query_labels = [labels.to(device) for labels in episode_data['query_labels']]
+        
+        # Forward pass
+        optimizer.zero_grad()
+        predictions = model(support_images, support_boxes, support_labels, query_images, n_way=episode_data.get('n_way', None))
 
-    # Compute loss
-    loss = compute_detection_loss(predictions, query_boxes, query_labels)
+        # Compute loss
+        loss = compute_detection_loss(predictions, query_boxes, query_labels)
+        
+        # Backward pass
+        loss.backward()
+        optimizer.step()
+        
+        return loss.item()
     
-    # Backward pass
-    loss.backward()
-    optimizer.step()
-    
-    return loss.item()
+    except RuntimeError as e:
+        if "out of memory" in str(e).lower() and retry_on_oom:
+            print(f"\n⚠️  OUT OF MEMORY detected! Clearing cache and retrying...")
+            
+            # Clear GPU cache
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.reset_peak_memory_stats()
+            
+            # Clear Python cache
+            import gc
+            gc.collect()
+            
+            print("✅ Cache cleared. Retrying episode...")
+            
+            # Retry recursively with retry_on_oom=False to prevent infinite loop
+            return train_episode(model, episode_data, optimizer, device, retry_on_oom=False)
+        else:
+            raise e
 
 
 def validate(model, val_loader, device, num_episodes=100):
@@ -209,36 +248,85 @@ def main(args):
         weight_decay=config.WEIGHT_DECAY
     )
     
-    # Learning rate scheduler
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=3000, gamma=0.5)
+    # Learning rate scheduler with warmup (better for few-shot learning)
+    # Linear warmup for 500 episodes, then cosine annealing
+    def lr_lambda(episode):
+        warmup_episodes = 500
+        if episode < warmup_episodes:
+            return float(episode) / warmup_episodes
+        else:
+            return 0.5 * (1.0 + np.cos(np.pi * (episode - warmup_episodes) / (config.NUM_EPISODES - warmup_episodes)))
+    
+    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     
     # Training loop
     print("Starting training...")
     best_val_loss = float('-inf')
+    oom_count = 0
     
     for episode, episode_data in enumerate(tqdm(train_loader, desc="Training")):
-        # Train
-        loss = train_episode(model, episode_data, optimizer, device)
-        scheduler.step()
+        try:
+            # Train
+            loss = train_episode(model, episode_data, optimizer, device)
+            scheduler.step()
+            oom_count = 0  # Reset OOM counter on successful episode
+            
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                oom_count += 1
+                print(f"\n❌ OOM Error #{oom_count}: {str(e)[:100]}")
+                print(f"   Clearing caches and skipping episode {episode + 1}...")
+                
+                # Emergency memory cleanup
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.reset_peak_memory_stats()
+                
+                import gc
+                gc.collect()
+                
+                if oom_count >= 3:
+                    print(f"\n🛑 OOM occurred {oom_count} times. Stopping training to prevent data loss.")
+                    print(f"   Checkpoints saved. Reduce batch size or image size in config.py")
+                    break
+                
+                continue  # Skip to next episode
+            else:
+                raise e
         
         # Log
         if (episode + 1) % config.LOG_FREQUENCY == 0:
-            print(f"Episode {episode + 1}/{config.NUM_EPISODES}, Loss: {loss:.4f}")
+            # Memory stats
+            if torch.cuda.is_available():
+                mem_used = torch.cuda.memory_allocated() / 1e9
+                mem_cached = torch.cuda.memory_reserved() / 1e9
+                print(f"Episode {episode + 1}/{config.NUM_EPISODES}, Loss: {loss:.4f}, GPU Mem: {mem_used:.2f}GB (cached: {mem_cached:.2f}GB)")
+            else:
+                print(f"Episode {episode + 1}/{config.NUM_EPISODES}, Loss: {loss:.4f}")
         
         # Validate
         if (episode + 1) % config.SAVE_FREQUENCY == 0:
-            val_loss, val_map = validate(model, val_loader, device, num_episodes=100)
-            print(f"Validation Loss: {val_loss:.4f}, Validation mAP: {val_map:.4f}")
+            try:
+                val_loss, val_map = validate(model, val_loader, device, num_episodes=100)
+                print(f"Validation Loss: {val_loss:.4f}, Validation mAP: {val_map:.4f}")
 
-            # Save checkpoint
-            save_checkpoint(model, optimizer, episode + 1, loss, config.CHECKPOINT_DIR)
+                # Save checkpoint
+                save_checkpoint(model, optimizer, episode + 1, loss, config.CHECKPOINT_DIR)
 
-            # Save best model by mAP
-            if val_map > best_val_loss:
-                best_val_loss = val_map
-                best_path = os.path.join(config.CHECKPOINT_DIR, 'best_model.pth')
-                torch.save(model.state_dict(), best_path)
-                print(f"Saved best model with val mAP: {val_map:.4f}")
+                # Save best model by mAP
+                if val_map > best_val_loss:
+                    best_val_loss = val_map
+                    best_path = os.path.join(config.CHECKPOINT_DIR, 'best_model.pth')
+                    torch.save(model.state_dict(), best_path)
+                    print(f"Saved best model with val mAP: {val_map:.4f}")
+            
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower():
+                    print(f"⚠️  OOM during validation. Skipping validation round...")
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                else:
+                    raise e
     
     # Save final model
     os.makedirs(config.CHECKPOINT_DIR, exist_ok=True)  # Ensure directory exists
