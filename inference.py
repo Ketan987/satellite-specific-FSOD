@@ -217,6 +217,11 @@ class FSODInference:
             box = pred_boxes[i]
             score = pred_scores[i]
             pred_class_idx = int(pred_classes[i].item()) if pred_classes is not None else 0
+            
+            # Safety: Validate class index is in valid range
+            if pred_class_idx < 0 or pred_class_idx >= n_way:
+                pred_class_idx = 0
+            
             pred_class_name = idx_to_class.get(pred_class_idx, 'object')
             
             # Convert box format [x, y, w, h] to [x_min, y_min, x_max, y_max]

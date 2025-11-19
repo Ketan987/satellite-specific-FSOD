@@ -457,9 +457,10 @@ def compute_detection_loss(predictions, target_boxes, target_labels, iou_thresho
             if isinstance(matched_labels, torch.Tensor):
                 matched_labels = torch.clamp(matched_labels, 0, n_way - 1)
             
-            # Shift to 1-indexed (0 is background), but ensure it doesn't exceed n_way
+            # Shift to 1-indexed (0 is background), but ensure valid index range is 0..n_way-1
+            # For n_way=5: valid indices are 0,1,2,3,4 so max shift is 4 (label=3+1)
             shifted_labels = matched_labels + 1
-            shifted_labels = torch.clamp(shifted_labels, 0, n_way)
+            shifted_labels = torch.clamp(shifted_labels, 0, n_way - 1)
             
             # Set targets for positive proposals using scatter (no in-place)
             targets = targets.scatter(0, pos_indices, shifted_labels.long())
