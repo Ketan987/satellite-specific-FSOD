@@ -77,6 +77,7 @@ class FSODInference:
         """
         img = Image.open(image_path).convert('RGB')
         draw = ImageDraw.Draw(img)
+        img_width, img_height = img.size
         
         # Try to load a font, fallback to default
         try:
@@ -98,8 +99,11 @@ class FSODInference:
             score = det['similarity_score']
             class_name = det.get('class_name', 'object')
             
-            # bbox format: [x_min, y_min, x_max, y_max]
-            x_min, y_min, x_max, y_max = bbox
+            # Clamp boxes to image bounds to avoid drawing artifacts
+            x_min = max(0.0, min(img_width, bbox[0]))
+            y_min = max(0.0, min(img_height, bbox[1]))
+            x_max = max(0.0, min(img_width, bbox[2]))
+            y_max = max(0.0, min(img_height, bbox[3]))
             
             # Draw box
             color = colors[idx % len(colors)]
@@ -154,8 +158,22 @@ class FSODInference:
             else:
                 raise ValueError(f"Invalid support image format: {support_item}")
 
-        # Validate images
-        self.validate_images(support_img_paths + [query_image])
+        # Validate that all provided paths exist before heavy work
+        validation_paths = support_img_paths.copy()
+        if isinstance(query_image, (str, Path)):
+            validation_paths.append(str(query_image))
+        self.validate_images(validation_paths)
+
+        # Load query image once so we can keep its original resolution for scaling
+        if isinstance(query_image, (str, Path)):
+            with Image.open(query_image) as img:
+                query_pil = img.convert('RGB')
+        elif isinstance(query_image, Image.Image):
+            query_pil = query_image.convert('RGB')
+        else:
+            raise ValueError("Query image must be a file path or PIL.Image")
+
+        orig_w, orig_h = query_pil.size
 
         # Load support images
         support_imgs = []
@@ -171,7 +189,7 @@ class FSODInference:
         # Prepare data
         support_tensors, query_tensor = prepare_inference_data(
             support_imgs,
-            query_image,
+            query_pil,
             self.config.IMAGE_SIZE
         )
         
@@ -212,6 +230,9 @@ class FSODInference:
         idx_to_class = {v: k for k, v in class_to_idx.items()}
 
         # Convert to output format [x_min, y_min, x_max, y_max]
+        scale_x = float(orig_w) / float(self.config.IMAGE_SIZE)
+        scale_y = float(orig_h) / float(self.config.IMAGE_SIZE)
+
         detections = []
         for i in range(len(pred_boxes)):
             box = pred_boxes[i]
@@ -227,8 +248,12 @@ class FSODInference:
             # Convert box format [x, y, w, h] to [x_min, y_min, x_max, y_max]
             box_np = box.cpu().numpy().astype(float)
             x, y, w, h = box_np
+            x_min = float(x * scale_x)
+            y_min = float(y * scale_y)
+            x_max = float((x + w) * scale_x)
+            y_max = float((y + h) * scale_y)
             detection = {
-                'bbox': [float(x), float(y), float(x + w), float(y + h)],
+                'bbox': [x_min, y_min, x_max, y_max],
                 'similarity_score': float(score.cpu().numpy()),
                 'class_name': pred_class_name
             }
