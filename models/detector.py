@@ -6,13 +6,22 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from models.backbone import ResNet50Backbone, FeatureEmbedding, ROIPooling
-from models.similarity import SimilarityMatcher, ProposalGenerator, non_max_suppression
+from models.similarity import SimilarityMatcher, non_max_suppression
+from models.rpn import RegionProposalNetwork
 
 
 class FSODDetector(nn.Module):
     """Few-Shot Object Detector"""
     
-    def __init__(self, feature_dim=2048, embed_dim=512, image_size=512, pretrained=True):
+    def __init__(
+        self,
+        feature_dim=2048,
+        embed_dim=512,
+        image_size=512,
+        pretrained=True,
+        anchor_scales=None,
+        anchor_ratios=None,
+    ):
         super(FSODDetector, self).__init__()
         
         # Feature extraction
@@ -25,8 +34,12 @@ class FSODDetector(nn.Module):
         # Similarity matcher
         self.similarity_matcher = SimilarityMatcher(embed_dim=embed_dim)
         
-        # Proposal generator
-        self.proposal_generator = ProposalGenerator()
+        # Region Proposal Network for adaptive proposals
+        self.rpn = RegionProposalNetwork(
+            in_channels=embed_dim,
+            anchor_scales=anchor_scales,
+            anchor_ratios=anchor_ratios,
+        )
         
         # Detection head
         self.detection_head = nn.Sequential(
@@ -77,7 +90,7 @@ class FSODDetector(nn.Module):
         
         return det_features
     
-    def forward(self, support_images, support_boxes, support_labels, query_images, n_way=None):
+    def forward(self, support_images, support_boxes, support_labels, query_images, query_boxes=None, n_way=None):
         """
         Forward pass
         
@@ -114,18 +127,20 @@ class FSODDetector(nn.Module):
             support_box_labels.extend([label_val] * num_boxes)
         support_box_labels = torch.tensor(support_box_labels, dtype=support_labels.dtype, device=support_labels.device)        # Generate proposals for query images
         Q, _, H, W = query_features.shape
-        feature_map_size = (query_features.shape[2], query_features.shape[3])
+
+        # Generate proposals using RPN to reduce grid artifacts
+        rpn_results = self.rpn(
+            query_features,
+            self.image_size,
+            gt_boxes=query_boxes if self.training and query_boxes is not None else None,
+        )
+        proposal_list = rpn_results['proposals']
+        rpn_losses = rpn_results.get('losses') if self.training else None
         
         all_predictions = []
         
         for q in range(Q):
-            # Generate proposals on correct device
-            proposals = self.proposal_generator.generate_proposals(
-                feature_map_size, self.image_size, device=query_features.device
-            )
-            
-            # Convert to boxes
-            proposal_boxes = self.proposal_generator.proposals_to_boxes(proposals, device=query_features.device)
+            proposal_boxes = proposal_list[q]
             
             # Extract features for proposals
             query_roi_features = self.extract_roi_features(
@@ -235,7 +250,8 @@ class FSODDetector(nn.Module):
                 'class_logits': class_logits,
                 'pred_classes': pred_classes,
                 'objectness_scores': objectness_filtered,
-                'similarity': similarity
+                'similarity': similarity,
+                'rpn_loss': rpn_losses[q] if rpn_losses is not None else None
             })
         
         return all_predictions
@@ -285,7 +301,14 @@ class FSODDetector(nn.Module):
         """
         self.eval()
         with torch.no_grad():
-            predictions = self.forward(support_images, support_boxes, support_labels, query_image, n_way=n_way)
+            predictions = self.forward(
+                support_images,
+                support_boxes,
+                support_labels,
+                query_image,
+                query_boxes=None,
+                n_way=n_way
+            )
             pred = predictions[0]
 
             boxes = pred['boxes']
@@ -478,6 +501,10 @@ def compute_detection_loss(predictions, target_boxes, target_labels, iou_thresho
             box_loss = F.smooth_l1_loss(pred_pos, gt_pos, reduction='mean')
 
         total_loss += cls_loss + box_loss * box_loss_weight
+
+        rpn_loss = pred.get('rpn_loss', None)
+        if rpn_loss is not None:
+            total_loss += rpn_loss
 
     if num_imgs == 0:
         return torch.tensor(0.0, device=device if device is not None else 'cpu')

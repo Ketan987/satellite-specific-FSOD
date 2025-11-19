@@ -41,7 +41,9 @@ class FSODInference:
             feature_dim=self.config.FEATURE_DIM,
             embed_dim=self.config.EMBEDDING_DIM,
             image_size=self.config.IMAGE_SIZE,
-            pretrained=False
+            pretrained=False,
+            anchor_scales=self.config.ANCHOR_SCALES,
+            anchor_ratios=self.config.ANCHOR_RATIOS
         ).to(self.device)
         
         # Load weights - handle both checkpoint dicts and raw state dicts

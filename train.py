@@ -10,6 +10,7 @@ import argparse
 from tqdm import tqdm
 import numpy as np
 import gc
+import copy
 
 # Memory optimization for Kaggle GPU
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:512'
@@ -47,7 +48,67 @@ def setup_multi_gpu(model, device):
     return model
 
 
-def train_episode(model, episode_data, optimizer, device, retry_on_oom=True):
+def build_support_query_labels(support_boxes, support_labels):
+    labels = []
+    for label_tensor, boxes in zip(support_labels, support_boxes):
+        label_val = int(label_tensor.item()) if isinstance(label_tensor, torch.Tensor) else int(label_tensor)
+        num_boxes = boxes.shape[0]
+        if num_boxes == 0:
+            labels.append(torch.tensor([label_val], dtype=torch.long, device=boxes.device))
+        else:
+            labels.append(torch.full((num_boxes,), label_val, dtype=torch.long, device=boxes.device))
+    return labels
+
+
+def maml_train_step(model, optimizer, config, device, support_images, support_boxes, support_labels,
+                    query_images, query_boxes, query_labels, n_way):
+    fast_model = copy.deepcopy(model)
+    fast_model.to(device)
+    fast_model.train()
+
+    inner_optimizer = optim.SGD(fast_model.parameters(), lr=config.MAML_INNER_LR)
+    support_query_labels = build_support_query_labels(support_boxes, support_labels)
+
+    for _ in range(max(1, config.MAML_INNER_STEPS)):
+        inner_optimizer.zero_grad()
+        inner_predictions = fast_model(
+            support_images,
+            support_boxes,
+            support_labels,
+            support_images,
+            query_boxes=support_boxes,
+            n_way=n_way
+        )
+        inner_loss = compute_detection_loss(inner_predictions, support_boxes, support_query_labels)
+        inner_loss.backward()
+        inner_optimizer.step()
+
+    optimizer.zero_grad()
+    fast_model.zero_grad()
+
+    meta_predictions = fast_model(
+        support_images,
+        support_boxes,
+        support_labels,
+        query_images,
+        query_boxes=query_boxes,
+        n_way=n_way
+    )
+    meta_loss = compute_detection_loss(meta_predictions, query_boxes, query_labels)
+    meta_loss.backward()
+
+    with torch.no_grad():
+        for param, fast_param in zip(model.parameters(), fast_model.parameters()):
+            if fast_param.grad is not None:
+                param.grad = fast_param.grad.detach().clone()
+            else:
+                param.grad = None
+
+    optimizer.step()
+    return meta_loss.item()
+
+
+def train_episode(model, episode_data, optimizer, device, config, retry_on_oom=True):
     """Train on a single episode with OOM handling"""
     model.train()
     
@@ -60,18 +121,39 @@ def train_episode(model, episode_data, optimizer, device, retry_on_oom=True):
         query_boxes = [boxes.to(device) for boxes in episode_data['query_boxes']]
         query_labels = [labels.to(device) for labels in episode_data['query_labels']]
         
-        # Forward pass
-        optimizer.zero_grad()
-        predictions = model(support_images, support_boxes, support_labels, query_images, n_way=episode_data.get('n_way', None))
+        n_way = episode_data.get('n_way', None)
 
-        # Compute loss
-        loss = compute_detection_loss(predictions, query_boxes, query_labels)
+        if config.USE_MAML:
+            loss = maml_train_step(
+                model,
+                optimizer,
+                config,
+                device,
+                support_images,
+                support_boxes,
+                support_labels,
+                query_images,
+                query_boxes,
+                query_labels,
+                n_way
+            )
+        else:
+            optimizer.zero_grad()
+            predictions = model(
+                support_images,
+                support_boxes,
+                support_labels,
+                query_images,
+                query_boxes=query_boxes,
+                n_way=n_way
+            )
+
+            loss = compute_detection_loss(predictions, query_boxes, query_labels)
+            loss.backward()
+            optimizer.step()
+            loss = loss.item()
         
-        # Backward pass
-        loss.backward()
-        optimizer.step()
-        
-        return loss.item()
+        return loss
     
     except RuntimeError as e:
         if "out of memory" in str(e).lower() and retry_on_oom:
@@ -89,7 +171,7 @@ def train_episode(model, episode_data, optimizer, device, retry_on_oom=True):
             print("✅ Cache cleared. Retrying episode...")
             
             # Retry recursively with retry_on_oom=False to prevent infinite loop
-            return train_episode(model, episode_data, optimizer, device, retry_on_oom=False)
+            return train_episode(model, episode_data, optimizer, device, config, retry_on_oom=False)
         else:
             raise e
 
@@ -112,7 +194,14 @@ def validate(model, val_loader, device, num_episodes=100):
             query_boxes = [boxes.to(device) for boxes in episode_data['query_boxes']]
             query_labels = [labels.to(device) for labels in episode_data['query_labels']]
 
-            predictions = model(support_images, support_boxes, support_labels, query_images, n_way=episode_data.get('n_way', None))
+            predictions = model(
+                support_images,
+                support_boxes,
+                support_labels,
+                query_images,
+                query_boxes=query_boxes,
+                n_way=episode_data.get('n_way', None)
+            )
             loss = compute_detection_loss(predictions, query_boxes, query_labels)
             total_loss += loss.item()
 
@@ -228,7 +317,9 @@ def main(args):
         feature_dim=config.FEATURE_DIM,
         embed_dim=config.EMBEDDING_DIM,
         image_size=config.IMAGE_SIZE,
-        pretrained=args.pretrained
+        pretrained=args.pretrained,
+        anchor_scales=config.ANCHOR_SCALES,
+        anchor_ratios=config.ANCHOR_RATIOS
     ).to(device)
     
     # Enable gradient checkpointing to save memory
@@ -267,7 +358,7 @@ def main(args):
     for episode, episode_data in enumerate(tqdm(train_loader, desc="Training")):
         try:
             # Train
-            loss = train_episode(model, episode_data, optimizer, device)
+            loss = train_episode(model, episode_data, optimizer, device, config)
             scheduler.step()
             oom_count = 0  # Reset OOM counter on successful episode
             
@@ -353,7 +444,14 @@ def main(args):
             query_boxes = [boxes.to(device) for boxes in episode_data['query_boxes']]
             query_labels = [labels.to(device) for labels in episode_data['query_labels']]
             
-            predictions = model(support_images, support_boxes, support_labels, query_images, n_way=episode_data.get('n_way', None))
+            predictions = model(
+                support_images,
+                support_boxes,
+                support_labels,
+                query_images,
+                query_boxes=query_boxes,
+                n_way=episode_data.get('n_way', None)
+            )
             loss = compute_detection_loss(predictions, query_boxes, query_labels)
             final_val_loss += loss.item()
             
