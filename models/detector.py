@@ -30,24 +30,23 @@ class FSODDetector(nn.Module):
         
         # Detection head
         self.detection_head = nn.Sequential(
-            nn.Linear(embed_dim * 7 * 7, 1024),
+            nn.Linear(embed_dim * 7 * 7, 512),  # Reduced from 1024 to save memory
             nn.ReLU(inplace=False),
-            nn.Dropout(0.5),
-            nn.Linear(1024, 512),
+            nn.Dropout(0.3),
+            nn.Linear(512, 256),  # Reduced from 512 to save memory
             nn.ReLU(inplace=False),
         )
         
         # Box refinement
-        self.box_regressor = nn.Linear(512, 4)
+        self.box_regressor = nn.Linear(256, 4)
         
         # Objectness: predicts "is this an object?" conditioned on class
-        # Concatenate class logits with features for objectness prediction
-        # This makes objectness depend on predicted class (joint learning)
+        # Simplified for memory efficiency while maintaining joint learning
         self.objectness = nn.Sequential(
-            nn.Linear(512 + 512, 256),  # 512 features + 512 from class context
+            nn.Linear(256, 64),  # Reduced to save GPU memory
             nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(256, 1)
+            nn.Dropout(0.2),
+            nn.Linear(64, 1)
         )
         
         self.image_size = image_size
@@ -74,7 +73,7 @@ class FSODDetector(nn.Module):
         roi_flat = roi_features.view(N, -1)  # [N, embed_dim * 7 * 7]
         
         # Detection head
-        det_features = self.detection_head(roi_flat)  # [N, 512]
+        det_features = self.detection_head(roi_flat)  # [N, 256]
         
         return det_features
     
@@ -195,22 +194,24 @@ class FSODDetector(nn.Module):
             # Objectness is CONDITIONED on predicted class (not independent)
             # This prevents high objectness scores for wrong classes
             
-            # Detach class logits to prevent circular gradients during objectness prediction
+            # Method: Modulate features based on class confidence (memory efficient)
             class_logits_for_objectness = class_sim.detach()  # [num_proposals, n_way]
             
-            # Create augmented feature vector: original features + class context
-            # This makes objectness depend on what class the proposal predicts
-            augmented_features = torch.cat([
-                query_roi_features,  # [P, 512] - visual features
-                class_logits_for_objectness  # [P, n_way] 
-            ], dim=1)  # [P, 512 + n_way]
+            # Get max class logit as scalar (class confidence indicator)
+            max_class_logit = class_logits_for_objectness.max(dim=1)[0].unsqueeze(1)  # [P, 1]
             
-            # Predict objectness conditioned on both visual features AND class prediction
-            objectness_raw = self.objectness(augmented_features).squeeze(1)  # [P]
+            # Modulate features: scale by class confidence
+            # High class confidence → boosts objectness
+            modulation = 0.5 + 0.5 * torch.sigmoid(max_class_logit)  # [P, 1]
+            modulated_features = query_roi_features * modulation  # [P, 256]
+            
+            # Predict objectness on modulated features
+            objectness_raw = self.objectness(modulated_features).squeeze(1)  # [P]
             objectness = torch.sigmoid(objectness_raw)  # [P], range [0, 1]
             
             # Convert class_sim to probabilities
             class_probs = torch.softmax(class_sim, dim=1)
+            max_class_probs, pred_classes = class_probs.max(dim=1)
             final_scores = max_class_probs * objectness
             
             # Critical Fix #5: Pre-filter proposals by objectness before NMS

@@ -12,12 +12,12 @@ class Config:
     # Model parameters
     BACKBONE = "resnet50"
     FEATURE_DIM = 2048  # ResNet-50 output
-    EMBEDDING_DIM = 512  # Reduced dimension for similarity
+    EMBEDDING_DIM = 256  # Reduced from 512 to save GPU memory (OOM fix)
     
     # Few-shot parameters
     N_WAY = 5  # Number of classes per episode
-    K_SHOT = 5  # Number of support examples per class (increased from 2 for better prototypes)
-    QUERY_SAMPLES = 20  # Number of query samples per episode (increased from 10 for better statistics)
+    K_SHOT = 3  # Reduced from 5 to save GPU memory (OOM fix)
+    QUERY_SAMPLES = 10  # Reduced from 20 to save GPU memory (OOM fix)
     
     # Training parameters
     BATCH_SIZE = 1
@@ -26,7 +26,7 @@ class Config:
     WEIGHT_DECAY = 5e-4
     
     # Image parameters
-    IMAGE_SIZE = 384  # Increased from 256 for better satellite image detail
+    IMAGE_SIZE = 256  # Reduced from 384 to save GPU memory (OOM fix)
     IMAGE_MEAN = [0.485, 0.456, 0.406]
     IMAGE_STD = [0.229, 0.224, 0.225]
     ALLOWED_FORMATS = ['.jpg', '.jpeg', '.JPG', '.JPEG']

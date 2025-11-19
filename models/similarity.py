@@ -137,7 +137,8 @@ class ProposalGenerator(nn.Module):
         
         # Critical Fix #2: Subsample to reduce proposal density
         # Reduces computation by 4-16x while maintaining coverage
-        step = max(1, int(stride_w / 16.0))  # Sample every ~16 pixels at image scale
+        # Further reduced step for OOM (every ~24 pixels instead of ~16)
+        step = max(1, int(stride_w / 10.0))  # Sample every ~24 pixels at image scale (was 16)
         
         # For each subsampled feature map location
         for i in range(0, H, step):
