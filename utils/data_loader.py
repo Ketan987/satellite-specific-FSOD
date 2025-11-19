@@ -5,7 +5,6 @@ Data loader for FSOD training
 import torch
 from torch.utils.data import Dataset
 import torchvision.transforms as T
-import numpy as np
 from PIL import Image
 
 
@@ -13,33 +12,39 @@ class FSODDataset(Dataset):
     """Few-Shot Object Detection Dataset"""
     
     def __init__(self, coco_dataset, n_way, k_shot, query_samples, 
-                 image_size=512, num_episodes=1000):
+                 image_size=512, num_episodes=1000, num_channels=3,
+                 image_mean=None, image_std=None, augment=True):
         self.coco_dataset = coco_dataset
         self.n_way = n_way
         self.k_shot = k_shot
         self.query_samples = query_samples
         self.image_size = image_size
         self.num_episodes = num_episodes
+        self.num_channels = num_channels
+        self.image_mean = image_mean or [0.485, 0.456, 0.406]
+        self.image_std = image_std or [0.229, 0.224, 0.225]
+
+        if len(self.image_mean) != self.num_channels or len(self.image_std) != self.num_channels:
+            raise ValueError(
+                f"IMAGE_MEAN/STD length must match INPUT_CHANNELS ({self.num_channels})."
+            )
         
         # Image transforms with augmentation for training
-        # Augmentation helps with few-shot learning and overfitting
-        self.transform = T.Compose([
-            T.Resize((image_size, image_size)),
-            T.RandomHorizontalFlip(p=0.5),
-            T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1, hue=0.05),
-            T.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0)),
-            T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406], 
-                       std=[0.229, 0.224, 0.225])
-        ])
+        self.transform = self._build_transform(augment=augment)
         
         # Deterministic transform for validation
-        self.transform_val = T.Compose([
-            T.Resize((image_size, image_size)),
-            T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406], 
-                       std=[0.229, 0.224, 0.225])
-        ])
+        self.transform_val = self._build_transform(augment=False)
+
+    def _build_transform(self, augment=True):
+        ops = [T.Resize((self.image_size, self.image_size))]
+        if augment:
+            ops.append(T.RandomHorizontalFlip(p=0.5))
+            if self.num_channels == 3:
+                ops.append(T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1, hue=0.05))
+                ops.append(T.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0)))
+        ops.append(T.ToTensor())
+        ops.append(T.Normalize(mean=self.image_mean, std=self.image_std))
+        return T.Compose(ops)
     
     def __len__(self):
         return self.num_episodes
@@ -61,7 +66,7 @@ class FSODDataset(Dataset):
         cat_to_label = {cat_id: i for i, cat_id in enumerate(selected_cats)}
         
         for item in support_data:
-            img, img_info = self.coco_dataset.get_image(item['image_id'])
+            img, img_info = self.coco_dataset.get_image(item['image_id'], num_channels=self.num_channels)
             orig_w, orig_h = img.size
             
             # Transform image
@@ -98,7 +103,7 @@ class FSODDataset(Dataset):
         query_labels = []
         
         for item in query_data:
-            img, img_info = self.coco_dataset.get_image(item['image_id'])
+            img, img_info = self.coco_dataset.get_image(item['image_id'], num_channels=self.num_channels)
             orig_w, orig_h = img.size
             
             # Transform image
@@ -133,10 +138,10 @@ class FSODDataset(Dataset):
             query_labels.append(torch.tensor(labels, dtype=torch.long))
         
         return {
-            'support_images': torch.stack(support_images),  # [N*K, 3, H, W]
+            'support_images': torch.stack(support_images),  # [N*K, C, H, W]
             'support_boxes': support_boxes,  # List of [num_boxes, 4]
             'support_labels': torch.tensor(support_labels, dtype=torch.long),  # [N*K]
-            'query_images': torch.stack(query_images),  # [Q, 3, H, W]
+            'query_images': torch.stack(query_images),  # [Q, C, H, W]
             'query_boxes': query_boxes,  # List of [num_boxes, 4]
             'query_labels': query_labels,  # List of [num_boxes]
             'n_way': self.n_way,
@@ -150,7 +155,8 @@ def collate_fn(batch):
     return batch[0]
 
 
-def prepare_inference_data(support_images, query_image, image_size=512):
+def prepare_inference_data(support_images, query_image, image_size=512,
+                           num_channels=3, image_mean=None, image_std=None):
     """
     Prepare data for inference
     
@@ -162,29 +168,37 @@ def prepare_inference_data(support_images, query_image, image_size=512):
     Returns:
         support_tensors, query_tensor
     """
+    mean = image_mean or [0.485, 0.456, 0.406]
+    std = image_std or [0.229, 0.224, 0.225]
+    if len(mean) != num_channels or len(std) != num_channels:
+        raise ValueError("Inference normalization stats must match num_channels.")
+
     transform = T.Compose([
         T.Resize((image_size, image_size)),
         T.ToTensor(),
-        T.Normalize(mean=[0.485, 0.456, 0.406], 
-                   std=[0.229, 0.224, 0.225])
+        T.Normalize(mean=mean, std=std)
     ])
     
     # Load and transform support images
     support_tensors = []
     for img in support_images:
         if isinstance(img, str):
-            # Validate JPEG
-            if not img.lower().endswith(('.jpg', '.jpeg')):
-                raise ValueError(f"Only JPEG images allowed. Got: {img}")
-            img = Image.open(img).convert('RGB')
+            img = Image.open(img)
+        img = _convert_image_mode(img, num_channels)
         support_tensors.append(transform(img))
     
     # Load and transform query image
     if isinstance(query_image, str):
-        if not query_image.lower().endswith(('.jpg', '.jpeg')):
-            raise ValueError(f"Only JPEG images allowed. Got: {query_image}")
-        query_image = Image.open(query_image).convert('RGB')
+        query_image = Image.open(query_image)
+    query_image = _convert_image_mode(query_image, num_channels)
     
     query_tensor = transform(query_image)
     
     return torch.stack(support_tensors), query_tensor.unsqueeze(0)
+
+
+def _convert_image_mode(image, num_channels):
+    desired_mode = {1: 'L', 3: 'RGB', 4: 'RGBA'}.get(num_channels)
+    if desired_mode:
+        return image.convert(desired_mode)
+    return image

@@ -10,11 +10,13 @@ import torchvision.models as models
 class ResNet50Backbone(nn.Module):
     """ResNet-50 feature extractor"""
     
-    def __init__(self, pretrained=True, feature_dim=2048):
+    def __init__(self, pretrained=True, feature_dim=2048, in_channels=3):
         super(ResNet50Backbone, self).__init__()
         
         # Load pretrained ResNet-50
         resnet = models.resnet50(pretrained=pretrained)
+        if in_channels != 3:
+            self._adapt_input_conv(resnet, in_channels)
         
         # Remove the final FC layer and avgpool
         self.features = nn.Sequential(*list(resnet.children())[:-2])
@@ -29,6 +31,36 @@ class ResNet50Backbone(nn.Module):
         for name, param in self.features.named_parameters():
             if 'layer1' in name or 'layer2' in name:
                 param.requires_grad = False
+
+    def _adapt_input_conv(self, resnet, in_channels):
+        """Adjust the first convolution to accept an arbitrary number of channels"""
+        old_conv = resnet.conv1
+        new_conv = nn.Conv2d(
+            in_channels,
+            old_conv.out_channels,
+            kernel_size=old_conv.kernel_size,
+            stride=old_conv.stride,
+            padding=old_conv.padding,
+            bias=old_conv.bias is not None
+        )
+
+        with torch.no_grad():
+            if in_channels == 1:
+                weight = old_conv.weight.mean(dim=1, keepdim=True)
+                new_conv.weight.copy_(weight)
+            elif in_channels > 3:
+                new_conv.weight[:, :3, :, :] = old_conv.weight
+                extra = in_channels - 3
+                mean_weight = old_conv.weight.mean(dim=1, keepdim=True)
+                for idx in range(extra):
+                    new_conv.weight[:, 3 + idx:4 + idx, :, :] = mean_weight
+            else:
+                new_conv.weight[:, :in_channels, :, :] = old_conv.weight[:, :in_channels, :, :]
+
+            if old_conv.bias is not None:
+                new_conv.bias.copy_(old_conv.bias)
+
+        resnet.conv1 = new_conv
     
     def forward(self, x):
         """

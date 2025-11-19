@@ -43,7 +43,8 @@ class FSODInference:
             image_size=self.config.IMAGE_SIZE,
             pretrained=False,
             anchor_scales=self.config.ANCHOR_SCALES,
-            anchor_ratios=self.config.ANCHOR_RATIOS
+            anchor_ratios=self.config.ANCHOR_RATIOS,
+            in_channels=self.config.INPUT_CHANNELS
         ).to(self.device)
         
         # Load weights - handle both checkpoint dicts and raw state dicts
@@ -169,9 +170,9 @@ class FSODInference:
         # Load query image once so we can keep its original resolution for scaling
         if isinstance(query_image, (str, Path)):
             with Image.open(query_image) as img:
-                query_pil = img.convert('RGB')
+                query_pil = img.copy()
         elif isinstance(query_image, Image.Image):
-            query_pil = query_image.convert('RGB')
+            query_pil = query_image.copy()
         else:
             raise ValueError("Query image must be a file path or PIL.Image")
 
@@ -182,17 +183,21 @@ class FSODInference:
         support_bboxes = []  # Auto-detected full image as bbox
         
         for img_path in support_img_paths:
-            img = Image.open(img_path).convert('RGB')
-            support_imgs.append(img)
+            with Image.open(img_path) as img:
+                img_pil = img.copy()
+            support_imgs.append(img_pil)
             # Use full image as bounding box [x, y, w, h]
-            w, h = img.size
+            w, h = img_pil.size
             support_bboxes.append([0, 0, w, h])
         
         # Prepare data
         support_tensors, query_tensor = prepare_inference_data(
             support_imgs,
             query_pil,
-            self.config.IMAGE_SIZE
+            self.config.IMAGE_SIZE,
+            num_channels=self.config.INPUT_CHANNELS,
+            image_mean=self.config.IMAGE_MEAN,
+            image_std=self.config.IMAGE_STD
         )
         
         support_tensors = support_tensors.to(self.device)

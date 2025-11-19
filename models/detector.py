@@ -21,11 +21,16 @@ class FSODDetector(nn.Module):
         pretrained=True,
         anchor_scales=None,
         anchor_ratios=None,
+        in_channels=3,
     ):
         super(FSODDetector, self).__init__()
         
         # Feature extraction
-        self.backbone = ResNet50Backbone(pretrained=pretrained, feature_dim=feature_dim)
+        self.backbone = ResNet50Backbone(
+            pretrained=pretrained,
+            feature_dim=feature_dim,
+            in_channels=in_channels
+        )
         self.embedding = FeatureEmbedding(in_dim=feature_dim, embed_dim=embed_dim)
         
         # ROI pooling

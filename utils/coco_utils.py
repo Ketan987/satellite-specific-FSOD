@@ -15,7 +15,7 @@ class COCODataset:
     def __init__(self, json_path, image_dir, allowed_formats=['.jpg', '.jpeg']):
         self.json_path = json_path
         self.image_dir = image_dir
-        self.allowed_formats = allowed_formats
+        self.allowed_formats = [fmt.lower() for fmt in allowed_formats]
         
         # Load COCO annotations
         with open(json_path, 'r') as f:
@@ -45,28 +45,39 @@ class COCODataset:
         for img_id, img_info in self.images.items():
             file_name = img_info['file_name']
             ext = os.path.splitext(file_name)[1].lower()
-            if ext in [fmt.lower() for fmt in self.allowed_formats]:
+            if ext in self.allowed_formats:
                 img_path = os.path.join(self.image_dir, file_name)
                 if os.path.exists(img_path):
                     valid.append(img_id)
         return valid
     
-    def get_image(self, image_id):
-        """Load image by ID"""
+    def get_image(self, image_id, num_channels=3):
+        """Load image by ID and convert to the requested number of channels"""
         img_info = self.images[image_id]
         img_path = os.path.join(self.image_dir, img_info['file_name'])
-        
-        # Validate JPEG
-        if not self._is_valid_jpeg(img_path):
-            raise ValueError(f"Invalid JPEG image: {img_path}")
-        
-        image = Image.open(img_path).convert('RGB')
+
+        if not self._is_valid_format(img_path):
+            raise ValueError(f"Unsupported image format: {img_path}")
+
+        image = Image.open(img_path)
+        desired_mode = self._pil_mode_from_channels(num_channels)
+        if desired_mode is not None:
+            image = image.convert(desired_mode)
         return image, img_info
     
-    def _is_valid_jpeg(self, img_path):
-        """Validate JPEG image"""
+    def _is_valid_format(self, img_path):
         ext = os.path.splitext(img_path)[1].lower()
-        return ext in [fmt.lower() for fmt in self.allowed_formats]
+        return ext in self.allowed_formats
+
+    @staticmethod
+    def _pil_mode_from_channels(num_channels):
+        if num_channels == 1:
+            return 'L'
+        if num_channels == 3:
+            return 'RGB'
+        if num_channels == 4:
+            return 'RGBA'
+        return None
     
     def get_annotations(self, image_id):
         """Get annotations for an image"""

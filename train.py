@@ -275,7 +275,11 @@ def main(args):
         k_shot=config.K_SHOT,
         query_samples=config.QUERY_SAMPLES,
         image_size=config.IMAGE_SIZE,
-        num_episodes=config.NUM_EPISODES
+        num_episodes=config.NUM_EPISODES,
+        num_channels=config.INPUT_CHANNELS,
+        image_mean=config.IMAGE_MEAN,
+        image_std=config.IMAGE_STD,
+        augment=True
     )
     
     val_dataset = FSODDataset(
@@ -284,7 +288,11 @@ def main(args):
         k_shot=config.K_SHOT,
         query_samples=config.QUERY_SAMPLES,
         image_size=config.IMAGE_SIZE,
-        num_episodes=1000
+        num_episodes=1000,
+        num_channels=config.INPUT_CHANNELS,
+        image_mean=config.IMAGE_MEAN,
+        image_std=config.IMAGE_STD,
+        augment=False
     )
     
     # Data loaders
@@ -317,7 +325,8 @@ def main(args):
         image_size=config.IMAGE_SIZE,
         pretrained=args.pretrained,
         anchor_scales=config.ANCHOR_SCALES,
-        anchor_ratios=config.ANCHOR_RATIOS
+        anchor_ratios=config.ANCHOR_RATIOS,
+        in_channels=config.INPUT_CHANNELS
     ).to(device)
     
     # Enable gradient checkpointing to save memory
