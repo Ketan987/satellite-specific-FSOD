@@ -47,7 +47,7 @@ class Config:
     
     # Checkpoint
     CHECKPOINT_DIR = "checkpoints/"
-    SAVE_FREQUENCY = 1000  # Save every N episodes
+    SAVE_FREQUENCY = 500  # Save every N episodes
     
     # Logging
     LOG_FREQUENCY = 100  # Log every N episodes
