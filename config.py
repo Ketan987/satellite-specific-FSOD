@@ -35,7 +35,7 @@ class Config:
     IOU_THRESHOLD = 0.5
     SCORE_THRESHOLD = 0.5  # Increased from 0.3 to filter noisy predictions
     NMS_THRESHOLD = 0.3  # Stricter NMS to remove overlapping boxes
-    MAX_DETECTIONS = 100
+    MAX_DETECTIONS = 20
     
     # Anchor boxes (scaled to IMAGE_SIZE)
     ANCHOR_SCALES = [32, 64, 128, 256]
