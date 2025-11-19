@@ -153,42 +153,53 @@ class FSODDetector(nn.Module):
             # ===== CRITICAL FIX #4: Immediate Box Validation =====
             # Validate boxes right after refinement (don't wait for ROI pooling)
             # This prevents clustering from invalid box coordinates
+            # FIX: Create new tensor instead of in-place modifications
             MIN_BOX_SIZE = 2.0
             
+            # Create new box tensor (no in-place operations)
+            validated_boxes = refined_boxes.clone()
+            
             # Clamp center coordinates to valid range
-            refined_boxes[:, 0] = torch.clamp(refined_boxes[:, 0], 0.0, 
-                                             float(self.image_size) - MIN_BOX_SIZE)
-            refined_boxes[:, 1] = torch.clamp(refined_boxes[:, 1], 0.0, 
-                                             float(self.image_size) - MIN_BOX_SIZE)
+            validated_boxes[:, 0] = torch.clamp(validated_boxes[:, 0], 0.0, 
+                                               float(self.image_size) - MIN_BOX_SIZE)
+            validated_boxes[:, 1] = torch.clamp(validated_boxes[:, 1], 0.0, 
+                                               float(self.image_size) - MIN_BOX_SIZE)
             
             # Clamp dimensions to positive values
-            refined_boxes[:, 2] = torch.clamp(refined_boxes[:, 2], MIN_BOX_SIZE, 
-                                             float(self.image_size))
-            refined_boxes[:, 3] = torch.clamp(refined_boxes[:, 3], MIN_BOX_SIZE, 
-                                             float(self.image_size))
+            validated_boxes[:, 2] = torch.clamp(validated_boxes[:, 2], MIN_BOX_SIZE, 
+                                               float(self.image_size))
+            validated_boxes[:, 3] = torch.clamp(validated_boxes[:, 3], MIN_BOX_SIZE, 
+                                               float(self.image_size))
             
             # Additional safety: ensure bottom-right corner stays in bounds
-            max_x = refined_boxes[:, 0] + refined_boxes[:, 2]
-            max_y = refined_boxes[:, 1] + refined_boxes[:, 3]
+            max_x = validated_boxes[:, 0] + validated_boxes[:, 2]
+            max_y = validated_boxes[:, 1] + validated_boxes[:, 3]
             
-            # If extends beyond image, shrink box
+            # If extends beyond image, shrink box (create new tensor, not in-place)
             out_of_bounds_x = max_x > self.image_size
             out_of_bounds_y = max_y > self.image_size
             
             if out_of_bounds_x.sum() > 0:
-                refined_boxes[out_of_bounds_x, 2] -= (max_x[out_of_bounds_x] - self.image_size)
+                w_adjusted = validated_boxes[:, 2].clone()
+                w_adjusted[out_of_bounds_x] = w_adjusted[out_of_bounds_x] - (max_x[out_of_bounds_x] - self.image_size)
+                validated_boxes[:, 2] = w_adjusted
+            
             if out_of_bounds_y.sum() > 0:
-                refined_boxes[out_of_bounds_y, 3] -= (max_y[out_of_bounds_y] - self.image_size)
+                h_adjusted = validated_boxes[:, 3].clone()
+                h_adjusted[out_of_bounds_y] = h_adjusted[out_of_bounds_y] - (max_y[out_of_bounds_y] - self.image_size)
+                validated_boxes[:, 3] = h_adjusted
             
             # Final safety clamp
-            refined_boxes[:, 0] = torch.clamp(refined_boxes[:, 0], 0.0, 
-                                             float(self.image_size) - MIN_BOX_SIZE)
-            refined_boxes[:, 1] = torch.clamp(refined_boxes[:, 1], 0.0, 
-                                             float(self.image_size) - MIN_BOX_SIZE)
-            refined_boxes[:, 2] = torch.clamp(refined_boxes[:, 2], MIN_BOX_SIZE, 
-                                             float(self.image_size))
-            refined_boxes[:, 3] = torch.clamp(refined_boxes[:, 3], MIN_BOX_SIZE, 
-                                             float(self.image_size))
+            validated_boxes[:, 0] = torch.clamp(validated_boxes[:, 0], 0.0, 
+                                               float(self.image_size) - MIN_BOX_SIZE)
+            validated_boxes[:, 1] = torch.clamp(validated_boxes[:, 1], 0.0, 
+                                               float(self.image_size) - MIN_BOX_SIZE)
+            validated_boxes[:, 2] = torch.clamp(validated_boxes[:, 2], MIN_BOX_SIZE, 
+                                               float(self.image_size))
+            validated_boxes[:, 3] = torch.clamp(validated_boxes[:, 3], MIN_BOX_SIZE, 
+                                               float(self.image_size))
+            
+            refined_boxes = validated_boxes
 
             # ===== CRITICAL FIX #3: Joint Objectness/Classification =====
             # Objectness is CONDITIONED on predicted class (not independent)
@@ -392,8 +403,7 @@ def compute_detection_loss(predictions, target_boxes, target_labels, iou_thresho
         num_pos = pos_mask.sum().item()
         num_neg = neg_mask.sum().item()
         
-        hard_neg_mask = torch.zeros(P, dtype=torch.bool, device=device)
-        
+        # Create hard negative mask using efficient torch operations (no in-place)
         if num_pos > 0 and num_neg > 0:
             # Target: 3 negatives per positive (standard ratio)
             target_num_hard_neg = min(num_neg, max(1, num_pos * 3))
@@ -405,19 +415,26 @@ def compute_detection_loss(predictions, target_boxes, target_labels, iou_thresho
             if target_num_hard_neg < num_neg:
                 _, top_hard_indices = torch.topk(neg_objectness, target_num_hard_neg)
                 # Map back to full indices
-                neg_indices = torch.where(neg_mask)[0]
-                hard_neg_indices = neg_indices[top_hard_indices]
-                hard_neg_mask[hard_neg_indices] = True
+                neg_full_indices = torch.where(neg_mask)[0]
+                hard_neg_full_indices = neg_full_indices[top_hard_indices]
+                # Create mask using torch.scatter (efficient, no in-place)
+                hard_neg_mask = torch.zeros(P, dtype=torch.bool, device=device)
+                hard_neg_mask.scatter_(0, hard_neg_full_indices, True)
             else:
                 # Keep all negatives if fewer than target
-                hard_neg_mask[neg_mask] = True
+                hard_neg_mask = neg_mask.clone()
         elif num_pos == 0 and num_neg > 0:
             # No positives: keep top 5% of negatives
             neg_objectness = objectness_scores[neg_mask].detach()
             top_k = max(1, num_neg // 20)  # 5% of negatives
             _, top_indices = torch.topk(neg_objectness, min(top_k, num_neg))
             neg_indices = torch.where(neg_mask)[0]
-            hard_neg_mask[neg_indices[top_indices]] = True
+            hard_neg_full_indices = neg_indices[top_indices]
+            # Create mask using torch.scatter (efficient, no in-place)
+            hard_neg_mask = torch.zeros(P, dtype=torch.bool, device=device)
+            hard_neg_mask.scatter_(0, hard_neg_full_indices, True)
+        else:
+            hard_neg_mask = torch.zeros(P, dtype=torch.bool, device=device)
         
         # Selected proposals: positives + hard negatives only
         selected_mask = pos_mask | hard_neg_mask
@@ -446,8 +463,8 @@ def compute_detection_loss(predictions, target_boxes, target_labels, iou_thresho
             shifted_labels = matched_labels + 1
             shifted_labels = torch.clamp(shifted_labels, 0, n_way)
             
-            # Set targets for positive proposals
-            targets[pos_indices] = shifted_labels.long()
+            # Set targets for positive proposals using scatter (no in-place)
+            targets = targets.scatter(0, pos_indices, shifted_labels.long())
 
         # ===== COMPUTE LOSS ONLY ON SELECTED PROPOSALS =====
         selected_logits = class_logits[selected_mask]
