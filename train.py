@@ -60,17 +60,23 @@ def build_support_query_labels(support_boxes, support_labels):
     return labels
 
 
-def maml_train_step(model, optimizer, config, device, support_images, support_boxes, support_labels,
-                    query_images, query_boxes, query_labels, n_way):
+def reptile_train_step(model, config, device, support_images, support_boxes, support_labels,
+                       query_images, query_boxes, query_labels, n_way):
+    """First-order Reptile meta update to avoid higher-order gradients."""
+
+    inner_steps = max(1, config.MAML_INNER_STEPS)
+    inner_lr = config.MAML_INNER_LR
+    meta_lr = config.MAML_META_LR
+
     fast_model = copy.deepcopy(model)
     fast_model.to(device)
     fast_model.train()
 
     support_query_labels = build_support_query_labels(support_boxes, support_labels)
-    inner_steps = max(1, config.MAML_INNER_STEPS)
+    inner_optimizer = optim.SGD(fast_model.parameters(), lr=inner_lr, momentum=0.9)
 
     for _ in range(inner_steps):
-        fast_model.zero_grad()
+        inner_optimizer.zero_grad(set_to_none=True)
         inner_predictions = fast_model(
             support_images,
             support_boxes,
@@ -80,45 +86,25 @@ def maml_train_step(model, optimizer, config, device, support_images, support_bo
             n_way=n_way
         )
         inner_loss = compute_detection_loss(inner_predictions, support_boxes, support_query_labels)
+        inner_loss.backward()
+        inner_optimizer.step()
 
-        grads = torch.autograd.grad(
-            inner_loss,
-            tuple(fast_model.parameters()),
-            retain_graph=False,
-            create_graph=False,
-            allow_unused=True
-        )
-
-        with torch.no_grad():
-            for param, grad in zip(fast_model.parameters(), grads):
-                if grad is None:
-                    continue
-                param -= config.MAML_INNER_LR * grad
-
-    optimizer.zero_grad()
-    fast_model.zero_grad()
-
-    meta_predictions = fast_model(
-        support_images,
-        support_boxes,
-        support_labels,
-        query_images,
-        query_boxes=query_boxes,
-        n_way=n_way
-    )
-    meta_loss = compute_detection_loss(meta_predictions, query_boxes, query_labels)
-    meta_loss.backward()
-
+    fast_model.eval()
     with torch.no_grad():
-        for param, fast_param in zip(model.parameters(), fast_model.parameters()):
-            grad = fast_param.grad
-            if grad is not None:
-                param.grad = grad.detach().clone()
-            else:
-                param.grad = None
+        meta_predictions = fast_model(
+            support_images,
+            support_boxes,
+            support_labels,
+            query_images,
+            query_boxes=query_boxes,
+            n_way=n_way
+        )
+        meta_loss = compute_detection_loss(meta_predictions, query_boxes, query_labels)
 
-    optimizer.step()
-    return meta_loss.item()
+        for param, fast_param in zip(model.parameters(), fast_model.parameters()):
+            param.add_(fast_param - param, alpha=meta_lr)
+
+    return float(meta_loss.item())
 
 
 def train_episode(model, episode_data, optimizer, device, config, retry_on_oom=True):
@@ -137,9 +123,8 @@ def train_episode(model, episode_data, optimizer, device, config, retry_on_oom=T
         n_way = episode_data.get('n_way', None)
 
         if config.USE_MAML:
-            loss = maml_train_step(
+            loss = reptile_train_step(
                 model,
-                optimizer,
                 config,
                 device,
                 support_images,

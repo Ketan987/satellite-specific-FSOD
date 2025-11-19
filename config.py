@@ -51,7 +51,8 @@ class Config:
     # Logging
     LOG_FREQUENCY = 100  # Log every N episodes
 
-    # Meta-learning (MAML/Reptile-style) parameters
-    USE_MAML = True  # Enable inner-loop adaptation
-    MAML_INNER_STEPS = 1  # Number of inner updates per episode
-    MAML_INNER_LR = 1e-4  # Learning rate for inner updates
+    # Meta-learning (Reptile-style) parameters
+    USE_MAML = True          # Enable meta-learning adaptation
+    MAML_INNER_STEPS = 1     # Support-set updates per episode
+    MAML_INNER_LR = 1e-4     # Inner loop learning rate
+    MAML_META_LR = 1e-4      # How aggressively to move base weights toward adapted weights
