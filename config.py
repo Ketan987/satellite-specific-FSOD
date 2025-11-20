@@ -15,9 +15,9 @@ class Config:
     EMBEDDING_DIM = 320  # Higher embedding width for better feature reuse on large GPUs
     
     # Few-shot parameters
-    N_WAY = 5  # Number of classes per episode
-    K_SHOT = 5  # Higher K-shot because high-end GPUs handle the additional support load
-    QUERY_SAMPLES = 15
+    N_WAY = 3  # Fewer classes per episode keeps GPU iterations lean
+    K_SHOT = 3  # Trim support set to reduce memory without big accuracy hit
+    QUERY_SAMPLES = 10
     
     # Training parameters
     BATCH_SIZE = 1
@@ -26,7 +26,7 @@ class Config:
     WEIGHT_DECAY = 1e-4
     
     # Image parameters
-    IMAGE_SIZE = 512  # Larger spatial context for high-end GPU setups
+    IMAGE_SIZE = 384  # Smaller resize speeds up training while keeping context
     INPUT_CHANNELS = 3
     IMAGE_MEAN = [0.485, 0.456, 0.406]
     IMAGE_STD = [0.229, 0.224, 0.225]
