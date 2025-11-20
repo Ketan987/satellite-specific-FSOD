@@ -18,6 +18,11 @@ os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:512'
 from config import Config
 from utils.coco_utils import COCODataset
 from utils.data_loader import FSODDataset, collate_fn
+
+# Enable faster GPU kernels when running on CUDA-capable hardware.
+if torch.cuda.is_available():
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
 from models.detector import FSODDetector, compute_detection_loss
 
 
@@ -240,6 +245,10 @@ def main(args):
     # Configuration
     config = Config()
     
+    # Allow CLI override for meta-learning toggle
+    if getattr(args, 'use_maml', None) is not None:
+        config.USE_MAML = args.use_maml
+
     # Override number of episodes for quick testing
     if args.num_episodes:
         config.NUM_EPISODES = args.num_episodes
@@ -288,17 +297,23 @@ def main(args):
     )
     
     # Data loaders
-    num_workers = 0  # Force single-process for CPU to avoid multiprocessing issues
+    pin_memory = torch.cuda.is_available()
+    num_workers = 0
     if getattr(args, 'test_episodes', None) is not None:
-        # use single-process data loading for quick CPU tests
-        num_workers = 0
+        pin_memory = False
+    elif torch.cuda.is_available():
+        cpu_count = os.cpu_count() or 2
+        num_workers = max(1, min(8, cpu_count // 2))
+    else:
+        pin_memory = False
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=1,  # 1 episode at a time
         shuffle=True,
         collate_fn=collate_fn,
-        num_workers=num_workers
+        num_workers=num_workers,
+        pin_memory=pin_memory
     )
     
     val_loader = DataLoader(
@@ -306,7 +321,8 @@ def main(args):
         batch_size=1,
         shuffle=False,
         collate_fn=collate_fn,
-        num_workers=num_workers
+        num_workers=num_workers,
+        pin_memory=pin_memory
     )
     
     # Create model
@@ -346,7 +362,9 @@ def main(args):
         else:
             return 0.5 * (1.0 + np.cos(np.pi * (episode - warmup_episodes) / (config.NUM_EPISODES - warmup_episodes)))
     
-    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    scheduler = None
+    if not config.USE_MAML:
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     
     # Training loop
     print("Starting training...")
@@ -357,7 +375,8 @@ def main(args):
         try:
             # Train
             loss = train_episode(model, episode_data, optimizer, device, config)
-            scheduler.step()
+            if scheduler is not None:
+                scheduler.step()
             oom_count = 0  # Reset OOM counter on successful episode
             
         except RuntimeError as e:
@@ -483,6 +502,9 @@ if __name__ == "__main__":
                        help="Run a small number of episodes for testing (overrides num_episodes for loader)" )
     parser.add_argument('--pretrained', action='store_true', help="Use pretrained backbone weights (may download)")
     parser.add_argument('--device', type=str, default='cpu', help="Device to use: 'cpu' or 'cuda'")
+    parser.add_argument('--use-maml', dest='use_maml', action='store_true', help="Enable Reptile-style meta-updates (slower but potentially better few-shot generalization)")
+    parser.add_argument('--no-use-maml', dest='use_maml', action='store_false', help="Disable meta-updates for faster standard training")
+    parser.set_defaults(use_maml=None)
     args = parser.parse_args()
     
     main(args)
